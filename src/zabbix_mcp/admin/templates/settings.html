@@ -108,6 +108,13 @@
                 <div class="form-hint">Max characters per tool response before truncation (default: 50000, min: 5000). Increase for template export workflows (e.g. 200000 for medium templates, 500000 for large built-in templates).</div>
             </div>
         </div>
+        <div class="settings-row">
+            <div class="settings-label">Time Zone <span class="tooltip-icon" tabindex="0" data-tooltip="Default zone for Zabbix entries without one. Used for *_local timestamps and for dates sent without a zone. IANA name such as Europe/London, or UTC, or system. Empty = the Zabbix user's zone, then the frontend default, then this host.">&#x1F6C8;</span></div>
+            <div>
+                <input type="text" name="timezone" class="form-input" value="{{ settings.timezone | default('') }}" placeholder="Europe/London" autocomplete="off" style="max-width:260px;" {% if current_user_role == 'viewer' %}disabled{% endif %}>
+                <div class="form-hint">Default zone for Zabbix entries without one. A Zabbix entry's or token's own zone wins. Empty = the Zabbix user's zone, then the frontend default, then this host.</div>
+            </div>
+        </div>
         <div class="settings-row" id="public-url">
             <div class="settings-label">Public URL <span class="tooltip-icon" tabindex="0" data-tooltip="External URL clients use to reach this server. Required when bind host is 0.0.0.0 - OAuth discovery hands this out, so it must be reachable from the AI client's machine.">&#x1F6C8;</span></div>
             <div>

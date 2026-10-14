@@ -34,7 +34,7 @@ BOOL_KEYS = {"compact_output", "enabled", "update_check_enabled", "use_starttls"
 SECTION_CONFIG = {
     "server": {
         "toml_section": "server",
-        "allowed_keys": {"host", "port", "transport", "log_level", "log_file", "compact_output", "response_max_chars", "public_url"},
+        "allowed_keys": {"host", "port", "transport", "log_level", "log_file", "compact_output", "response_max_chars", "public_url", "timezone"},
         "min_role": "admin",
     },
     "tls_access": {
@@ -342,6 +342,22 @@ async def settings_update(request: Request) -> Response:
                     "/settings", f"Public URL is invalid: {exc}", "danger"
                 )
 
+    # [server].timezone (issue #75): default zone for Zabbix entries
+    # without one. The loader refuses an unknown name at boot, so
+    # validate here; the normalised spelling (UTC, system) is what
+    # gets written.
+    normalized_values: dict[str, str] = {}
+    if "timezone" in allowed_keys and "timezone" in form:
+        tz_raw = str(form.get("timezone", "") or "").strip()
+        if tz_raw:
+            from zabbix_mcp.timezones import validate_timezone
+            try:
+                normalized_values["timezone"] = validate_timezone(tz_raw)
+            except ValueError as exc:
+                return admin_app.flash_redirect(
+                    "/settings", f"Time zone is invalid: {exc}", "danger"
+                )
+
     # [reporting] / [reporting.email] - the config parser refuses these
     # at boot, so catch them here instead of letting a save brick the
     # next start (issue #68).
@@ -471,7 +487,7 @@ async def settings_update(request: Request) -> Response:
                 elif key in config_section:
                     del config_section[key]
             elif key in form:
-                value = str(form.get(key, "")).strip()
+                value = normalized_values.get(key, str(form.get(key, "")).strip())
                 if value == "":
                     # Secrets like api_key: blank form value means
                     # "don't touch the stored value" so the operator

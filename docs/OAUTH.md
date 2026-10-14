@@ -376,6 +376,10 @@ scope set with the operator's cap and rejects with HTTP 403 if the
 result is empty - so a determined operator who edits the disabled
 checkbox in the DOM cannot bypass the cap.
 
+## Time zone of an OAuth client
+
+A `[tokens.X]` entry carries its own `timezone`; an OAuth-issued token has no config row, so its zone is settled at consent (since v1.38, issue #75). The portal user's `[admin.users.X].timezone` (the "Time zone" field on the user form) wins when set; otherwise the zone the operator's browser reports on the login and consent pages (`Intl.DateTimeFormat().resolvedOptions().timeZone`, posted as a hidden `browser_timezone` field, empty without JavaScript); otherwise the token carries no zone and the server falls back to the Zabbix entry's and `[server]`'s `timezone` as for any other call. The user's own zone ranks first, like a `[tokens.X]` zone; the browser-reported one is only a hint and ranks below `[zabbix.<name>].timezone` and `[server].timezone`, so an operator's pin wins over it. The zone rides on the authorization code, the access token and the refresh token next to the role, so it survives refresh-token rotation, and the `oauth.consent_granted` audit row records it. An unknown zone is dropped silently (browser) or logged and dropped (config); it never fails a login.
+
 ## Refresh-token reuse detection
 
 Per RFC 6819 §5.2.2.3, replaying an already-rotated refresh token

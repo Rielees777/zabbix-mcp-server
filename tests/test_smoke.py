@@ -1653,7 +1653,8 @@ class TestProblemActiveExtension(unittest.TestCase):
         prob = body["problems"][0]
         self.assertEqual(prob["host"], "web1")
         self.assertEqual(prob["severity_label"], "high")
-        self.assertTrue(prob["time"].endswith("UTC"))
+        # v1.38: rendered in the zone resolved for the call, ISO 8601 with offset
+        self.assertRegex(prob["time"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$")
         self.assertEqual(prob["eventid"], "9")
 
     def test_problem_active_get_default_severity_floor(self):

@@ -59,6 +59,24 @@ def _parse_timeout(raw) -> int:
     return v
 
 
+def _parse_timezone(raw) -> tuple[str, str | None]:
+    """Coerce the optional ``timezone`` form field (issue #75).
+
+    Returns ``(normalised_name, None)`` for a valid zone, ``("", None)``
+    for an empty field (= inherit, the key is dropped from config) and
+    ``("", error_message)`` for anything the loader would refuse at the
+    next boot.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "", None
+    from zabbix_mcp.timezones import validate_timezone
+    try:
+        return validate_timezone(text), None
+    except ValueError as exc:
+        return "", f"Time zone is invalid: {exc}"
+
+
 def _normalize_url(url: str) -> str:
     """Normalise a Zabbix URL the way the config loader does.
 
@@ -203,6 +221,8 @@ async def server_create(request: Request) -> Response:
     read_only = "read_only" in form
     verify_ssl = "verify_ssl" in form
     request_timeout = _parse_timeout(form.get("request_timeout"))
+    timezone_raw = str(form.get("timezone", "")).strip()
+    timezone_name, timezone_err = _parse_timezone(timezone_raw)
 
     # Re-render the /servers page with the Add Server card open and
     # the typed values preserved so a typo (especially in the URL)
@@ -222,6 +242,7 @@ async def server_create(request: Request) -> Response:
             "form_legacy_auth": legacy_auth,
             "form_read_only": read_only,
             "form_verify_ssl": verify_ssl,
+            "form_timezone": timezone_raw,
         })
 
     if not name or not _SERVER_NAME_RE.match(name):
@@ -258,6 +279,9 @@ async def server_create(request: Request) -> Response:
         if not api_token:
             return _err("API token is required.")
 
+    if timezone_err:
+        return _err(timezone_err)
+
     # Explicit duplicate-name check before tomlkit raises
     # `KeyAlreadyPresent: Key "<name>" already exists.` and we have to
     # reformat its internal "Key" wording into a user-facing
@@ -285,6 +309,9 @@ async def server_create(request: Request) -> Response:
             server_data["password"] = password
         else:
             server_data["api_token"] = api_token
+        if timezone_name:
+            # Empty = inherit; the key is simply absent (never "").
+            server_data["timezone"] = timezone_name
         add_config_table(admin_app.config_path, "zabbix", name, server_data)
         logger.info("Zabbix server '%s' added by %s", name, session.user)
         client_ip = request.client.host if request.client else ""
@@ -366,6 +393,7 @@ async def server_edit(request: Request) -> Response:
     # cleared it (vs. just not changing).
     frontend_username = str(form.get("frontend_username", "")).strip()
     frontend_password = str(form.get("frontend_password", "")).strip()
+    timezone_name, timezone_err = _parse_timezone(form.get("timezone", ""))
 
     # Validate new name (allow keeping the same name as a no-op rename)
     if not new_name or not _SERVER_NAME_RE.match(new_name):
@@ -407,6 +435,8 @@ async def server_edit(request: Request) -> Response:
                 return admin_app.flash_redirect(_back, "Username/password login is only for Zabbix 5.0-5.2 and must be enabled with the Legacy auth checkbox. On Zabbix 5.4+ use an API token.", "danger")
             if not api_token and not stored.get("api_token"):
                 return admin_app.flash_redirect(_back, "API token is required when Legacy auth is off.", "danger")
+        if timezone_err:
+            return admin_app.flash_redirect(_back, timezone_err, "danger")
 
         # Apply field updates to the existing table first
         if url:
@@ -416,6 +446,12 @@ async def server_edit(request: Request) -> Response:
         zabbix[server_name]["read_only"] = read_only
         zabbix[server_name]["verify_ssl"] = verify_ssl
         zabbix[server_name]["request_timeout"] = request_timeout
+        # timezone (issue #75): text field, blank = inherit = key removed
+        # so the file never carries `timezone = ""`.
+        if timezone_name:
+            zabbix[server_name]["timezone"] = timezone_name
+        else:
+            zabbix[server_name].pop("timezone", None)
         # frontend_username always writes (text field, blank = clear).
         zabbix[server_name]["frontend_username"] = frontend_username
         # frontend_password: only overwrite when the operator typed

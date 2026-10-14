@@ -113,7 +113,8 @@ _HOST_METHODS: list[MethodDef] = [
         api_method="host.massupdate",
         tool_name="host_massupdate",
         description=(
-            "Mass-update properties on multiple hosts at once. Replaces specified properties "
+            "Mass-update properties on multiple hosts at once (removed in Zabbix 8.0 - use "
+            "host_update per host there). Replaces specified properties "
             "for all listed hosts. Params must include 'hosts' (array of host IDs) and the "
             "properties to set."
         ),
@@ -183,7 +184,10 @@ _HOSTGROUP_METHODS: list[MethodDef] = [
     MethodDef(
         api_method="hostgroup.massupdate",
         tool_name="hostgroup_massupdate",
-        description="Replace all hosts or templates in the specified host groups.",
+        description=(
+            "Replace all hosts or templates in the specified host groups. Removed in Zabbix 8.0 - "
+            "use hostgroup_update, hostgroup_massadd or hostgroup_massremove there."
+        ),
         read_only=False,
         params=MASS_PARAMS,
     ),
@@ -271,6 +275,8 @@ _HOSTINTERFACE_METHODS: list[MethodDef] = [
         description=(
             "Replace all interfaces on a host. Any existing interfaces not present in the request "
             "will be removed. Params must include 'hostid' and 'interfaces' array."
+            " Removed in Zabbix 8.0 - use hostinterface_update, hostinterface_massadd or "
+            "hostinterface_massremove there."
         ),
         read_only=False,
         params=[
@@ -556,7 +562,10 @@ _TEMPLATE_METHODS: list[MethodDef] = [
     MethodDef(
         api_method="template.massupdate",
         tool_name="template_massupdate",
-        description="Replace groups, hosts, or macros for multiple templates at once.",
+        description=(
+            "Replace groups, hosts, or macros for multiple templates at once. Removed in Zabbix 8.0 - "
+            "use template_update, template_massadd or template_massremove there."
+        ),
         read_only=False,
         params=MASS_PARAMS,
     ),
@@ -621,7 +630,10 @@ _TEMPLATEGROUP_METHODS: list[MethodDef] = [
     MethodDef(
         api_method="templategroup.massupdate",
         tool_name="templategroup_massupdate",
-        description="Replace all templates in the specified template groups.",
+        description=(
+            "Replace all templates in the specified template groups. Removed in Zabbix 8.0 - "
+            "use templategroup_update, templategroup_massadd or templategroup_massremove there."
+        ),
         read_only=False,
         params=MASS_PARAMS,
     ),

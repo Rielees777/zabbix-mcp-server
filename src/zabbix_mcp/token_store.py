@@ -145,6 +145,14 @@ class TokenInfo:
     # LLM clients - operators must explicitly opt a token in for use by
     # programmatic / non-LLM consumers (Python scripts, n8n workflows).
     allow_raw_json: bool = False
+    # Zone this token's caller lives in (issue #75): ``<field>_local``
+    # renderings and zone-less date inputs use it. Wins over the Zabbix
+    # entry's and ``[server]``'s ``timezone``. None = inherit.
+    timezone: str | None = None
+    # True when ``timezone`` was only reported by a browser at OAuth
+    # consent, not written by an operator: it then ranks below the
+    # Zabbix entry's and ``[server]``'s zone instead of above them.
+    timezone_implicit: bool = False
     # Runtime stats (in-memory only, not persisted)
     last_used_at: str | None = None
     last_used_ip: str | None = None
@@ -237,6 +245,20 @@ class TokenStore:
                 )
                 allow_raw_json_val = False
 
+            # timezone: an unknown zone is ignored with a warning rather
+            # than refusing the token - a typo here must not lock a
+            # client out, it only falls back to the next level.
+            tz_val: str | None = None
+            raw_tz = cfg.get("timezone")
+            if isinstance(raw_tz, str) and raw_tz.strip():
+                from zabbix_mcp.timezones import validate_timezone
+                try:
+                    tz_val = validate_timezone(raw_tz)
+                except ValueError as e:
+                    logger.warning("Token '%s': %s; ignoring its timezone", token_id, e)
+            elif raw_tz not in (None, ""):
+                logger.warning("Token '%s' has non-string timezone=%r; ignoring", token_id, raw_tz)
+
             info = TokenInfo(
                 id=token_id,
                 name=cfg.get("name", token_id),
@@ -250,6 +272,7 @@ class TokenStore:
                 is_legacy=cfg.get("is_legacy", False),
                 revoked=not cfg.get("is_active", True),
                 allow_raw_json=allow_raw_json_val,
+                timezone=tz_val,
             )
 
             # Preserve runtime stats from existing token

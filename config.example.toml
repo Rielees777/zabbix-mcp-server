@@ -36,6 +36,13 @@ host = "127.0.0.1"
 # TCP port for the HTTP server (1–65535).
 port = 8080
 
+# Time zone for rendering timestamps (the "<field>_local" result fields) and
+# for reading date-times sent without a zone. IANA name, "UTC" or "system"
+# (the zone of the host running this server). Fallback for every Zabbix
+# server; [zabbix.<name>].timezone and [tokens.<id>].timezone override it.
+# Empty (default) = ask Zabbix (API user's zone, then frontend default).
+# timezone = "Europe/London"
+
 # External URL clients use to reach this MCP server. Set this when the
 # server is exposed via a public DNS name, a reverse proxy, or NAT - or
 # whenever `host` is "0.0.0.0" / "::" and remote clients would otherwise
@@ -570,6 +577,7 @@ update_check_enabled = true
 # allowed_ips = ["10.0.0.0/24"]   # Optional IP/CIDR whitelist
 # allowed_servers = ["*"]          # Optional: restrict to specific Zabbix servers
 # expires_at = "2026-12-31T23:59:59Z"  # Optional expiry (ISO 8601)
+# timezone = "Europe/London"      # Optional: zone for this client's timestamps (wins over [zabbix.*] and [server])
 #
 # allow_raw_json = false           # When true, this token may pass `raw_json: true`
 #                                  # on any tool call to skip the
@@ -634,6 +642,11 @@ read_only = true
 # Default: true.
 verify_ssl = true
 
+# Time zone for this server's timestamps. Overrides [server].timezone;
+# a token's timezone overrides this. IANA name, "UTC" or "system".
+# Empty (default) = the zone Zabbix reports for the API user.
+# timezone = "Europe/London"
+
 # Skip Zabbix API version compatibility check. Enable this when connecting
 # to a Zabbix version newer than what zabbix-utils has been tested with.
 # Default: false.
@@ -665,3 +678,4 @@ verify_ssl = true
 # read_only = false
 # verify_ssl = false
 # skip_version_check = false
+# timezone = "Europe/London"

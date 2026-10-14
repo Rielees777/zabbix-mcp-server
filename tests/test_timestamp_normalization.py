@@ -175,7 +175,10 @@ class TestThroughRegisteredTools(unittest.TestCase):
     def setUpClass(cls):
         from mcp.server.mcpserver import MCPServer
 
-        cfg = AppConfig(server=ServerConfig(), zabbix_servers={"t": ZabbixServerConfig(
+        # Pin the zone to UTC: since v1.38 a date-time without a zone is read
+        # in the resolved zone (tests/test_timezones.py covers that); the
+        # expectations below are about the parsing, so keep them in UTC.
+        cfg = AppConfig(server=ServerConfig(timezone="UTC"), zabbix_servers={"t": ZabbixServerConfig(
             name="t", url="http://localhost", api_token="x", read_only=False)})
         cls.mgr = ClientManager(cfg)
         cls.mcp = MCPServer(name="test")

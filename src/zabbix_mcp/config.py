@@ -47,6 +47,12 @@ class ZabbixServerConfig:
     read_only: bool = True
     verify_ssl: bool = True
     skip_version_check: bool = False
+    # Zone for ``<field>_local`` renderings and for date-times the caller
+    # sends without a zone (issue #75). IANA name, "UTC" or "system".
+    # Empty = the zone of the Zabbix user behind the API token, then the
+    # Zabbix frontend default, then this host's zone. A token's own
+    # ``timezone`` wins over this; this wins over ``[server].timezone``.
+    timezone: str = ""
     # Legacy password login for Zabbix 5.0-5.2, which have no API tokens.
     # Off by default and only honoured when `legacy_auth` is set: the
     # operator has to say out loud that they are pointing an AI at a
@@ -136,6 +142,9 @@ class ServerConfig:
     # opt in here. HTTP transport uses the per-token ``allow_raw_json``
     # flag instead and ignores this setting.
     stdio_allow_raw_json: bool = False
+    # Default zone for every Zabbix entry that has none of its own
+    # (issue #75); see ``ZabbixServerConfig.timezone``. Empty = ask Zabbix.
+    timezone: str = ""
 
 
 @dataclass(frozen=True)
@@ -452,10 +461,26 @@ def _parse_zabbix_server(name: str, srv: object) -> "ZabbixServerConfig":
         read_only=srv.get("read_only", True),
         verify_ssl=srv.get("verify_ssl", True),
         skip_version_check=srv.get("skip_version_check", False),
+        timezone=_validate_timezone_setting(srv.get("timezone", ""), f"[zabbix.{name}].timezone"),
         frontend_username=str(srv.get("frontend_username", "")),
         frontend_password=_resolve_env_vars(str(srv.get("frontend_password", ""))),
         request_timeout=int(srv.get("request_timeout", 300)),
     )
+
+
+def _validate_timezone_setting(value: object, where: str) -> str:
+    """Empty stays empty; anything else must be a zone ``timezones.validate_timezone`` accepts."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ConfigError(f"{where} must be a string such as \"Europe/London\", got {value!r}")
+    if not value.strip():
+        return ""
+    from zabbix_mcp.timezones import validate_timezone
+    try:
+        return validate_timezone(value)
+    except ValueError as e:
+        raise ConfigError(f"{where}: {e}") from e
 
 
 def _validate_public_url(value: str, tls_cert_file: object) -> str:
@@ -684,6 +709,7 @@ def load_config(path: str | Path) -> AppConfig:
         report_company=server_raw.get("report_company", ""),
         report_subtitle=server_raw.get("report_subtitle", "IT Monitoring Service"),
         stdio_allow_raw_json=bool(server_raw.get("stdio_allow_raw_json", False)),
+        timezone=_validate_timezone_setting(server_raw.get("timezone", ""), "[server].timezone"),
     )
 
     zabbix_raw = raw.get("zabbix", {})

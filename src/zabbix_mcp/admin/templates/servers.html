@@ -78,6 +78,11 @@
                 <input type="checkbox" name="verify_ssl" {% if add_form_open %}{% if form_verify_ssl %}checked{% endif %}{% else %}checked{% endif %}> Verify SSL <span class="tooltip-icon">&#x1F6C8;</span>
             </label>
         </div>
+        <div class="form-group">
+            <label class="form-label" for="add-timezone">Time zone <span class="tooltip-icon" tabindex="0" data-tooltip="Zone for *_local timestamps and for dates sent without a zone. Empty = the Zabbix user's zone, then the frontend default, then this host. A token's own zone wins.">&#x1F6C8;</span></label>
+            <input type="text" name="timezone" id="add-timezone" class="form-input" placeholder="Europe/London" value="{{ form_timezone | default('') }}" autocomplete="off" style="max-width:260px;">
+            <small class="text-muted">Zone for *_local timestamps and for dates sent without a zone. Empty = the Zabbix user's zone, then the frontend default, then this host. A token's own zone wins.</small>
+        </div>
         <div id="add-test-result" style="margin-bottom:12px;"></div>
         <div style="display:flex; gap:8px;">
             {# One primary action: test then save in a single click. The
