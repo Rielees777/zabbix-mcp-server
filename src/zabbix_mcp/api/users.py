@@ -504,7 +504,7 @@ _TOKEN_METHODS: list[MethodDef] = [
         description=(
             "Create a new API token. Required fields: 'name' and 'userid' (the "
             "user this token authenticates as). Optional: 'expires_at' (Unix "
-            "timestamp for expiry, 0 for no expiry), 'status' (0=enabled, "
+            "timestamp or ISO 8601 date-time for expiry, 0 for no expiry), 'status' (0=enabled, "
             "1=disabled), 'description'. After creation, call token.generate to "
             "obtain the actual authentication string."
         ),

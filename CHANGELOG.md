@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.37.4 - 2026-10-14
+
+One bug report that turned out to be the visible corner of a larger gap. Please upgrade if your client sends dates as text.
+
+### Fixed
+
+- **ISO 8601 timestamps were only converted in a few shapes, on a few paths** ([#94](https://github.com/initMAX/zabbix-mcp-server/issues/94), reported by [@notlakshitha](https://github.com/notlakshitha) with the diagnosis and the fix for the parser). The server promises to turn an ISO 8601 date-time from the LLM into the Unix timestamp Zabbix wants. The parser only knew six `strptime` formats, so `2026-04-01T08:00:00.000Z` (JavaScript `toISOString()`), `2026-04-01T08:00:00.123456` (Python `isoformat()`) and `2026-04-01 08:00:00+02:00` went to Zabbix as strings and were rejected there. Verifying the report through the real tool path showed the conversion was reachable in far fewer places than the code comment claimed: the typed `time_from` / `time_till` of `history_get`, `trend_get`, `event_get`, `problem_get`, `alert_get`, `auditlog_get` and `period_from` / `period_to` of `sla_getsli` were declared integers, so the schema validation refused **every** ISO string ("Input should be a valid integer") before the normaliser ran - including the plain `...Z` form the parser did handle; values passed through `extra_params` (for example `trigger_get` `lastChangeSince`) were merged *after* normalisation and never converted; `zabbix_raw_api_call` never called it; and nested fields (`maintenance_create` `timeperiods[].start_date`, `sla_create` `effective_date` and `excluded_downtimes[].period_from / period_to`, the `clock` of every `history_push` entry) were never visited. Now the parser tries `datetime.fromisoformat` first with the `Z` suffix normalised (the same rule as the token expiry parser since v1.37.1, so Python 3.10 behaves like 3.11+), keeping the explicit formats as a fallback; the normaliser walks dicts and lists at any depth and knows `period_from`, `period_to`, `lastChangeSince`, `lastChangeTill`, `effective_date` and `start_date` in addition to the old six; it runs after the `extra_params` merge, on `zabbix_raw_api_call`, and on list payloads; and the fourteen typed timestamp parameters are now `integer | string`, described as "Unix timestamp or ISO 8601 date-time", so a client may send either. A value without a zone is still read as UTC, as before. Integers, numeric strings and anything that is not a date-time pass through unchanged for Zabbix to judge; a float timestamp becomes an int.
+
+### Verified
+
+- 537 unit + e2e tests, all passing. The 26 new ones drive the real registered tools through `MCPServer.call_tool`, schema validation included, and assert on the parameters that reach the Zabbix client: every typed get parameter, `extra_params`, a typed value winning over `extra_params`, `maintenance_create` / `token_create` / `sla_create` at depth, `history_push`, `zabbix_raw_api_call` with a `filter.clock` list, numeric strings and non-dates left alone, and the parser on the reporter's inputs plus offsets, lower-case `z`, whitespace and fractional seconds. On the v1.37.3 code 20 of the 26 fail (the only ones that pass are the pass-through cases). The same two modules pass under `python:3.10-slim`.
+- CRUD smoke against live Zabbix 7.4; installer matrix 18/18.
+
 ## v1.37.3 - 2026-10-10
 
 Security release. One authorization bug in OAuth, reported privately through `SECURITY.md`, plus a related gap in the MCP resources. Please upgrade if you have `[oauth] enabled = true`.

@@ -60,9 +60,10 @@ from zabbix_mcp.config import AppConfig
 logger = logging.getLogger("zabbix_mcp.server")
 
 # Map param_type strings to Python types for dynamic signature building
-_PYTHON_TYPES: dict[str, type] = {
+_PYTHON_TYPES: dict[str, Any] = {
     "str": str,
     "int": int,
+    "timestamp": int | str,  # Unix timestamp or ISO 8601 string; normalised in _build_zabbix_params
     "bool": bool,
     "list[str]": list[str],
     "list": list,
@@ -319,67 +320,127 @@ _ARRAY_FIELDS: set[str] = {
 }
 
 
-# Fields that contain Unix timestamps.  LLMs often send ISO 8601 strings
-# (e.g. "2026-04-01 08:00:00") instead of ints — we auto-convert them.
-_TIMESTAMP_FIELDS: set[str] = {
-    "active_since", "active_till",
-    "time_from", "time_till",
-    "expires_at", "clock",
-}
+# Fields that carry Unix timestamps in Zabbix API requests.  LLMs often
+# send ISO 8601 strings (e.g. "2026-04-01 08:00:00") instead of ints - we
+# auto-convert them, at any nesting depth (maintenance ``timeperiods[]``,
+# SLA ``excluded_downtimes[]``, ``history.push`` items, ``filter`` ...).
+_TIMESTAMP_FIELDS: frozenset[str] = frozenset({
+    "active_since", "active_till",       # maintenance, report
+    "time_from", "time_till",            # history, trend, event, problem, alert, auditlog
+    "period_from", "period_to",          # sla.getsli, sla excluded_downtimes
+    "lastChangeSince", "lastChangeTill", # trigger.get
+    "expires_at",                        # token
+    "effective_date",                    # sla
+    "start_date",                        # maintenance one-time timeperiod
+    "clock",                             # history.push, filters
+})
 
-# Common ISO 8601 formats that LLMs produce.
-_TIMESTAMP_FORMATS: list[str] = [
+# Formats ``datetime.fromisoformat`` does not take on every supported
+# interpreter (3.10 wants the ``T`` or a single separator and a full
+# ``HH:MM`` at least); tried after it, in this order.
+_TIMESTAMP_FORMATS: tuple[str, ...] = (
     "%Y-%m-%dT%H:%M:%S%z",
     "%Y-%m-%dT%H:%M:%S",
     "%Y-%m-%d %H:%M:%S",
     "%Y-%m-%dT%H:%M",
     "%Y-%m-%d %H:%M",
     "%Y-%m-%d",
-]
+    "%Y-%m-%d %H:%M:%S%z",
+    "%Y-%m-%dT%H:%M:%S.%f%z",
+    "%Y-%m-%dT%H:%M:%S.%f",
+)
+
+_NUMERIC_TIMESTAMP_RE = re.compile(r"[0-9]+(\.[0-9]+)?")
 
 
 def _try_parse_timestamp(value: str) -> int | None:
-    """Try to parse an ISO 8601 string into a Unix timestamp.
+    """Parse an ISO 8601 date-time string into a Unix timestamp.
 
-    Returns the integer timestamp on success, ``None`` if the string
-    does not match any known format.
+    ``datetime.fromisoformat`` goes first, after a trailing ``Z`` is
+    rewritten to ``+00:00`` (Python 3.10 does not accept the suffix,
+    same as ``parse_expiry`` in ``token_store``), so fractional seconds
+    of any width, a space separator and a UTC offset all parse.  The
+    explicit ``strptime`` formats remain as a fallback for the few
+    shapes 3.10's ``fromisoformat`` rejects.  A value without a zone
+    is read as UTC.  Returns ``None`` for anything that is not a
+    date-time, so the caller can leave the value for Zabbix to judge.
     """
-    for fmt in _TIMESTAMP_FORMATS:
-        try:
-            dt = datetime.strptime(value, fmt)
-            # If no timezone info, assume UTC
-            if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=timezone.utc)
-            return int(dt.timestamp())
-        except ValueError:
-            continue
-    return None
-
-
-def _normalize_timestamps(params: dict[str, Any]) -> dict[str, Any]:
-    """Convert ISO 8601 datetime strings to Unix timestamps in known fields.
-
-    Only touches fields listed in ``_TIMESTAMP_FIELDS``.  Integer values
-    and numeric strings pass through unchanged.
-    """
-    changed = False
-    result = params
-    for field in _TIMESTAMP_FIELDS:
-        if field not in params:
-            continue
-        raw = params[field]
-        if isinstance(raw, int):
-            continue
-        if isinstance(raw, str):
-            if raw.isdigit():
+    raw = value.strip()
+    if not raw or not raw[0].isdigit():
+        return None
+    iso = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+    dt: datetime | None = None
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        for fmt in _TIMESTAMP_FORMATS:
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
                 continue
-            ts = _try_parse_timestamp(raw)
-            if ts is not None:
-                if not changed:
-                    result = {**params}
-                    changed = True
-                result[field] = ts
-    return result
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp())
+
+
+def _normalize_timestamp_value(raw: Any) -> Any:
+    """Return *raw* as a Unix timestamp int when it can be read as one."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.isdigit():
+            return raw  # already a Unix timestamp; Zabbix takes numeric strings
+        if _NUMERIC_TIMESTAMP_RE.fullmatch(text):
+            return int(float(text))  # "1775030400.0" - a float that was stringified
+        ts = _try_parse_timestamp(text)
+        return raw if ts is None else ts
+    return raw
+
+
+def _normalize_timestamps(params: Any) -> Any:
+    """Convert ISO 8601 date-time strings to Unix timestamps in known fields.
+
+    Walks dicts and lists recursively; only values under a key listed in
+    ``_TIMESTAMP_FIELDS`` are touched.  Integers and numeric strings pass
+    through unchanged.  The input is never mutated - a new container is
+    returned only on the paths where something changed.
+    """
+    if isinstance(params, dict):
+        result = params
+        for key, value in params.items():
+            if key in _TIMESTAMP_FIELDS and not isinstance(value, (dict, list)):
+                new_value = _normalize_timestamp_value(value)
+            elif key in _TIMESTAMP_FIELDS and isinstance(value, list):
+                converted = [
+                    _normalize_timestamp_value(v) if not isinstance(v, (dict, list)) else _normalize_timestamps(v)
+                    for v in value
+                ]
+                new_value = value if all(a is b for a, b in zip(converted, value)) else converted
+            else:
+                new_value = _normalize_timestamps(value)
+            if new_value is not value:
+                if result is params:
+                    result = dict(params)
+                result[key] = new_value
+        return result
+    if isinstance(params, list):
+        result = params
+        for index, value in enumerate(params):
+            new_value = _normalize_timestamps(value)
+            if new_value is not value:
+                if result is params:
+                    result = list(params)
+                result[index] = new_value
+        return result
+    return params
 
 
 def _resolve_enum_value(raw: Any, mapping: dict[str, int]) -> Any:
@@ -834,7 +895,7 @@ def _build_zabbix_params(
             return [{"hostid": v} for v in values]
         if method_def.api_method == "script.getscriptsbyevents":
             return [{"eventid": v} for v in values]
-        return values
+        return _normalize_timestamps(values)
 
     # Delete methods expect a plain list of IDs
     if "ids" in args and (
@@ -917,9 +978,6 @@ def _build_zabbix_params(
         else:
             params["output"] = "extend"
 
-    # Convert ISO timestamps in get params (e.g. time_from, time_till)
-    params = _normalize_timestamps(params)
-
     # Convert severity_min → severities for event.get and problem.get
     # Zabbix 7.x dropped severity_min; the API expects severities (int array).
     if (
@@ -938,7 +996,9 @@ def _build_zabbix_params(
                 continue
             params.setdefault(k, v)
 
-    return params
+    # Convert ISO timestamps in get params (e.g. time_from, time_till), after
+    # the merge so values arriving through extra_params are covered too.
+    return _normalize_timestamps(params)
 
 
 # API methods that support valuemap assignment by name.
@@ -1837,7 +1897,7 @@ def _register_tools(
                 client_manager.check_write(server_name)
 
             result = await asyncio.to_thread(
-                client_manager.call, server_name, method, params or {},
+                client_manager.call, server_name, method, _normalize_timestamps(params or {}),
             )
             return _format_result(_truncate_result(result, max_chars=response_max_chars), raw_json)
         except ToolError:

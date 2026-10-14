@@ -1106,8 +1106,8 @@ _MAINTENANCE_METHODS: list[MethodDef] = [
         api_method="maintenance.create",
         tool_name="maintenance_create",
         description=(
-            "Create a new maintenance period. Requires 'name', 'active_since', 'active_till', "
-            "'timeperiods', and either 'groups' (list of {'groupid': X}) or 'hosts' (list of "
+            "Create a new maintenance period. Requires 'name', 'active_since', 'active_till' "
+            "(Unix timestamp or ISO 8601 date-time), 'timeperiods', and either 'groups' (list of {'groupid': X}) or 'hosts' (list of "
             "{'hostid': X}) to define which hosts are affected. Zabbix 6.0+ replaced the legacy "
             "groupids/hostids arrays with these object lists. Symbolic names accepted for "
             "'maintenance_type': DATA_COLLECTION (with data), NO_DATA (without data)."

@@ -142,13 +142,13 @@ _ALERT_GET_EXTRA: list[ParamDef] = [
         "Return only alerts for the given host IDs.",
     ),
     ParamDef(
-        "time_from", "int",
-        "Return only alerts generated after this Unix timestamp (inclusive). "
+        "time_from", "timestamp",
+        "Return only alerts generated after this time (Unix timestamp or ISO 8601 date-time such as 2026-04-01T08:00:00Z; a value without a zone is read as UTC) (inclusive). "
         "Useful for auditing recent notification delivery.",
     ),
     ParamDef(
-        "time_till", "int",
-        "Return only alerts generated before this Unix timestamp (inclusive).",
+        "time_till", "timestamp",
+        "Return only alerts generated before this time (Unix timestamp or ISO 8601 date-time such as 2026-04-01T08:00:00Z; a value without a zone is read as UTC) (inclusive).",
     ),
 ]
 
