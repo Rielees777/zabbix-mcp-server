@@ -254,7 +254,8 @@ _HISTORY_GET = MethodDef(
         "every collected value and is the most granular data source in Zabbix. "
         "Always specify the 'history' parameter to select the correct data type "
         "(0=numeric float, 1=character/string, 2=log, 3=numeric unsigned, "
-        "4=text). Use 'time_from' and 'time_till' (Unix timestamp or ISO 8601) to bound "
+        "4=text, 5=binary on 7.0+, 6=JSON on 8.0+; Zabbix assumes 3 when omitted). "
+        "Use 'time_from' and 'time_till' (Unix timestamp or ISO 8601) to bound "
         "the time range. Combine with 'itemids' or 'hostids' to target specific "
         "metrics. For long time ranges, consider using trend.get instead as it "
         "returns aggregated min/avg/max values and is more efficient."
@@ -271,9 +272,10 @@ _HISTORY_GET = MethodDef(
         ),
         ParamDef(
             "history", "int",
-            "History data type to retrieve: 0=numeric float (default), "
-            "1=character/string, 2=log, 3=numeric unsigned, 4=text. "
-            "Must match the item's type of information.",
+            "History data type to retrieve: 0=numeric float, 1=character/string, "
+            "2=log, 3=numeric unsigned (Zabbix default when omitted), 4=text, "
+            "5=binary (7.0+), 6=JSON (8.0+). Must match the item's value_type, "
+            "otherwise the result is empty.",
         ),
         ParamDef(
             "time_from", "timestamp",

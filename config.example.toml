@@ -110,6 +110,15 @@ rate_limit = 300
 # Set to false to always return all fields (pre-1.13 behavior).
 compact_output = true
 
+# Validate get requests against the per-method contract before they reach
+# Zabbix (default: true). A sort field the method cannot sort by, a filter
+# on a text property, an unknown selectXxx / parameter / output property, or
+# a parameter from a newer Zabbix release than the server runs is refused
+# with the allowed values in the message. Set to false to forward every
+# request as-is (Zabbix then rejects some and silently ignores the rest).
+# zabbix_raw_api_call is never validated.
+# validate_get_params = true
+
 # Maximum characters per tool response before truncation. Default 50000
 # (roughly 12k tokens), minimum 5000. Increase for workflows that export
 # large Zabbix templates via configuration_export (a typical built-in

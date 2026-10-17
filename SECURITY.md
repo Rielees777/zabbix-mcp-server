@@ -147,7 +147,8 @@ The route is served outside the MCP endpoint's `TransportSecuritySettings`, so i
 
 | Version | Supported |
 |---|---|
-| 1.38 (latest) | Yes |
+| 1.39 (latest) | Yes |
+| 1.38 | Yes |
 | 1.37.4 | Yes |
 | 1.37.3 | Yes |
 | 1.37.2 | Yes - upgrade, see advisory below |

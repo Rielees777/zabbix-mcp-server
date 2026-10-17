@@ -1302,7 +1302,7 @@ _DSERVICE_METHODS: list[MethodDef] = [
             "discovered hosts (dhost) and are created by network discovery rules (drule)."
         ),
         read_only=True,
-        compact_fields=("dserviceid", "dhostid", "type", "status"),
+        compact_fields=("dserviceid", "dhostid", "dcheckid", "ip", "port", "status"),
         params=COMMON_GET_PARAMS + _DSERVICE_GET_EXTRA,
     ),
 ]

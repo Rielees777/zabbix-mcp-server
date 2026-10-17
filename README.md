@@ -1034,13 +1034,18 @@ The same mechanism works per-token via `[tokens.*].scopes` - see [MCP Authentica
 <table>
 <tr><th width="220">Parameter</th><th>Description</th></tr>
 <tr><td><code>server</code></td><td>Target Zabbix server name — defaults to the first configured server when omitted</td></tr>
-<tr><td><code>output</code></td><td>Fields to return — by default returns a compact set of key fields; pass <code>extend</code> for all fields, or comma-separated field names (e.g. <code>hostid,name,status</code>)</td></tr>
-<tr><td><code>filter</code></td><td>Exact match filter as JSON object — e.g. <code>{"status": 0}</code> returns only enabled objects</td></tr>
-<tr><td><code>search</code></td><td>Pattern match filter as JSON object — e.g. <code>{"name": "web"}</code> finds all objects containing "web" in the name</td></tr>
+<tr><td><code>output</code></td><td>Properties to return — by default a compact set of key fields; pass <code>extend</code> for all, <code>count</code> for the number of matches, or comma-separated property names (e.g. <code>hostid,name,status</code>)</td></tr>
+<tr><td><code>filter</code></td><td>Exact match as JSON object — e.g. <code>{"status": 0}</code> returns only enabled objects; not for <code>text</code> properties</td></tr>
+<tr><td><code>search</code></td><td>Substring match as JSON object — e.g. <code>{"name": "web"}</code>; string and text properties only</td></tr>
 <tr><td><code>limit</code></td><td>Maximum number of results to return — use to avoid large responses</td></tr>
-<tr><td><code>sortfield</code> / <code>sortorder</code></td><td>Sort results by a field name in <code>ASC</code> (ascending) or <code>DESC</code> (descending) order</td></tr>
+<tr><td><code>sortfield</code> / <code>sortorder</code></td><td>Sort by one of the method's sortable properties in <code>ASC</code> or <code>DESC</code> order</td></tr>
 <tr><td><code>countOutput</code></td><td>Return the count of matching objects instead of the actual data — useful for statistics</td></tr>
+<tr><td><code>extra_params</code></td><td>The method's other native parameters and its <code>selectXxx</code> sub-object selects, merged into the request as-is</td></tr>
 </table>
+
+Every `*_get` tool spells these out for **its own method** in `tools/list`: which properties `output`, `filter` and `search` take, which values `sortfield` accepts, which `selectXxx` and native parameters `extra_params` may carry, each with the Zabbix release that introduced or removed it (`selectHostGroups (6.2+)`, `selectGroups (removed in 7.2)`). A parameter a method does not have is not offered at all (`trend_get` has no `filter`, `search` or `sortfield`; `hanode_get` filters on `name`, `address`, `status` only). The contract behind it, `src/zabbix_mcp/api/get_contracts.json`, comes from the Zabbix API reference pages of 5.0 through 8.0 (`scripts/build_get_contracts.py`) and is checked against live servers of 6.0 through 7.4 with `scripts/audit_get_contracts_live.py`.
+
+The same contract guards the request: a sort field the method cannot sort by, a `filter` on a text property, an unknown `selectXxx` or `output` property, or a parameter from a newer release than the server runs is refused **before** the call, with the allowed values in the message. Zabbix would reject some of these and silently ignore the rest, which is worse for a model, since it believes it filtered. When Zabbix itself rejects a call, its validation message (`Invalid parameter "/sortfield/1": value must be one of "name", "lastaccess", "status"`) is returned to the model, marked as untrusted text; transport and internal errors stay generic. `zabbix_raw_api_call` is not validated against the contract, so it remains the way to send a parameter the catalog does not know.
 
 ## Time zones
 
@@ -1097,6 +1102,7 @@ All available options with detailed descriptions are in [`config.example.toml`](
 <tr><td><code>allowed_hosts</code></td><td>IP allowlist — IPs and CIDR ranges (e.g. <code>["10.0.0.0/24"]</code>)</td></tr>
 <tr><td><code>allowed_import_dirs</code></td><td>Directories for <code>source_file</code> imports (default: disabled)</td></tr>
 <tr><td><code>compact_output</code></td><td>Return only key fields from get methods (default: <code>true</code>); set to <code>false</code> to always return all fields</td></tr>
+<tr><td><code>validate_get_params</code></td><td>Refuse a get request the method's contract says Zabbix would reject or silently ignore, with the allowed values in the message (default: <code>true</code>); set to <code>false</code> to forward every request as-is. See <a href="#common-parameters-get-methods">Common Parameters</a></td></tr>
 <tr><td><code>response_max_chars</code></td><td>Maximum characters per tool response before truncation (default: <code>50000</code>, min: <code>5000</code>). Increase for template export workflows: <code>200000</code> for medium templates, <code>500000</code> for large built-in templates. See <a href="#token-budget">Token Budget</a></td></tr>
 <tr><td><code>timezone</code></td><td>Zone for the <code>&lt;field&gt;_local</code> output fields and for date-times sent without a zone - IANA name (<code>Europe/London</code>), <code>UTC</code> or <code>system</code>. Fallback for every Zabbix server; <code>[zabbix.&lt;name&gt;].timezone</code> and <code>[tokens.&lt;id&gt;].timezone</code> override it. Empty (default) = ask Zabbix. See <a href="#time-zones">Time zones</a></td></tr>
 <tr><td rowspan="8"><code>[zabbix.&lt;name&gt;]</code></td><td><code>url</code></td><td>Zabbix frontend URL (must start with <code>http://</code> or <code>https://</code>)</td></tr>

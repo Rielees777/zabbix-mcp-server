@@ -123,6 +123,7 @@ class ServerConfig:
     # running behind nginx on localhost.
     trusted_proxies: list[str] | None = None
     compact_output: bool = True
+    validate_get_params: bool = True
     response_max_chars: int = 50000
     # Freshness hint (seconds) attached to tools/list results as the
     # 2026-07-28 CacheableResult ``ttlMs``. The tool catalog only changes
@@ -674,6 +675,10 @@ def load_config(path: str | Path) -> AppConfig:
     if not isinstance(compact_output_raw, bool):
         raise ConfigError("'compact_output' must be a boolean (true or false)")
 
+    validate_get_raw = server_raw.get("validate_get_params", True)
+    if not isinstance(validate_get_raw, bool):
+        raise ConfigError("'validate_get_params' must be a boolean (true or false)")
+
     response_max_chars_raw = server_raw.get("response_max_chars", 50000)
     if not isinstance(response_max_chars_raw, int) or response_max_chars_raw < 5000:
         raise ConfigError("'response_max_chars' must be an integer >= 5000")
@@ -703,6 +708,7 @@ def load_config(path: str | Path) -> AppConfig:
         allowed_origins=allowed_origins,
         trusted_proxies=trusted_proxies,
         compact_output=compact_output_raw,
+        validate_get_params=validate_get_raw,
         response_max_chars=response_max_chars_raw,
         tools_list_cache_ttl=tools_cache_ttl_raw,
         report_logo=server_raw.get("report_logo"),
