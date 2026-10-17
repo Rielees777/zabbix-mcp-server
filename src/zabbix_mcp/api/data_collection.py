@@ -1168,7 +1168,10 @@ _CORRELATION_METHODS: list[MethodDef] = [
         tool_name="correlation_create",
         description=(
             "Create a new event correlation. Requires 'name', 'filter' (conditions), "
-            "and 'operations' (actions to take when conditions match)."
+            "and 'operations' (actions to take when conditions match). "
+            "filter.evaltype: 0=And/Or, 1=And, 2=Or, 3=custom expression; 'formula' and "
+            "the conditions' 'formulaid' only with evaltype 3 (the server drops them "
+            "otherwise, together with the read-only eval_formula)."
         ),
         read_only=False,
         params=CREATE_PARAMS,
@@ -1176,7 +1179,12 @@ _CORRELATION_METHODS: list[MethodDef] = [
     MethodDef(
         api_method="correlation.update",
         tool_name="correlation_update",
-        description="Update an existing event correlation. The 'correlationid' field is required.",
+        description=(
+            "Update an existing event correlation. The 'correlationid' field is required. "
+            "A correlation as returned by correlation_get (with selectFilter / selectOperations) "
+            "can be sent back as-is: the read-only eval_formula and, outside custom "
+            "expressions (evaltype 3), formula and formulaid are dropped before the call."
+        ),
         read_only=False,
         params=UPDATE_PARAMS,
     ),

@@ -53,6 +53,7 @@ from mcp.types import (
 )
 
 from zabbix_mcp.api import ALL_METHODS
+from zabbix_mcp.api.action_payload import strip_correlation_for_write, strip_for_write
 from zabbix_mcp.api.contracts import (
     compact_output_for, contract_for, describe_extra_params, describe_filter,
     describe_output, describe_search, specialise_params, validate_get_params,
@@ -1125,6 +1126,37 @@ _VALUEMAP_METHODS: set[str] = {
 }
 
 
+_ACTION_WRITE_METHODS = {"action.create", "action.update"}
+_CORRELATION_WRITE_METHODS = {"correlation.create", "correlation.update"}
+
+
+def _sanitize_action_payload(
+    params: Any,
+    api_method: str,
+    client_manager: ClientManager,
+    server_name: str,
+) -> Any:
+    """Drop what ``action.get`` returns but ``action.update`` / ``create``
+    refuse (api/action_payload.py). An update that does not say its event
+    source gets it from a one-field ``action.get``, so the source-specific
+    rules apply; if that lookup fails the generic rules still do."""
+    if api_method in _CORRELATION_WRITE_METHODS:
+        return strip_correlation_for_write(params)
+    if api_method not in _ACTION_WRITE_METHODS or not isinstance(params, dict):
+        return params
+    eventsource = None
+    if api_method == "action.update" and "eventsource" not in params and params.get("actionid"):
+        try:
+            rows = client_manager.call(server_name, "action.get", {
+                "output": ["eventsource"], "actionids": [str(params["actionid"])],
+            })
+            if rows:
+                eventsource = rows[0].get("eventsource")
+        except Exception as exc:  # the update itself will report the real problem
+            logger.debug("eventsource lookup for action %s failed: %s", params.get("actionid"), exc)
+    return strip_for_write(params, eventsource)
+
+
 def _resolve_valuemap_by_name(
     params: Any,
     api_method: str,
@@ -1847,6 +1879,10 @@ def _make_tool_handler(
                 )
             params = await asyncio.to_thread(
                 _resolve_valuemap_by_name,
+                params, method_def.api_method, client_manager, server_name,
+            )
+            params = await asyncio.to_thread(
+                _sanitize_action_payload,
                 params, method_def.api_method, client_manager, server_name,
             )
             if auth_sessionid:
