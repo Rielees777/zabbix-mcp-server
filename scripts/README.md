@@ -42,8 +42,8 @@ not a refusal and that no tool returned `isError: true`.
   --report llm_smoke_report.md
 ```
 
-OpenAI key is read from `[admin.ai].api_key` in the running server's
-config (override with `--openai-key` or by editing `--config`). One full
+The OpenAI key is read from the `OPENAI_API_KEY` environment variable
+(override with `--openai-key`). One full
 run on `gpt-4o` is roughly $0.50 and takes 5-10 minutes.
 
 What it catches: tool description / UX bugs that fool LLMs even when the

@@ -9,13 +9,14 @@ git clone https://github.com/initMAX/zabbix-mcp-server.git
 cd zabbix-mcp-server
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev,reporting]"
+cp .env.example .env   # settings are read from ZABBIX_MCP_* environment variables
 ```
 
 ## Running Tests
 
 ```bash
-python -m pytest tests/test_smoke.py -v
+python -m pytest tests -v
 ```
 
 ## Project Structure
@@ -23,7 +24,8 @@ python -m pytest tests/test_smoke.py -v
 ```
 src/zabbix_mcp/
 ├── cli.py              # CLI entry point
-├── config.py           # TOML config loading
+├── config.py           # pydantic-settings models (env / secrets-dir configuration)
+├── auth.py             # bearer-token verifier + per-request context
 ├── client.py           # Multi-server Zabbix client + rate limiter
 ├── server.py           # MCPServer (SDK 2.x) server + dynamic tool registration
 └── api/

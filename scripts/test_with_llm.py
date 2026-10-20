@@ -17,7 +17,7 @@ Per-scenario validation:
 
 LLM provider: OpenAI Chat Completions (gpt-4o-mini by default for cost,
 override with ``--model gpt-4o`` for the strongest run). API key comes
-from ``[admin.ai].api_key`` in the running server's config.
+from the ``OPENAI_API_KEY`` environment variable.
 
 Output: markdown report with one row per scenario - tools called,
 final answer excerpt, pass / fail status.
@@ -26,6 +26,7 @@ final answer excerpt, pass / fail status.
 from __future__ import annotations
 
 import argparse
+import os
 import asyncio
 import json
 import re
@@ -336,15 +337,10 @@ async def run_scenario(
 
 
 async def main_async(args: argparse.Namespace) -> int:
-    # Load OpenAI key from config.toml [admin.ai].api_key unless overridden.
-    api_key = args.openai_key
+    # OpenAI key: --openai-key, else the OPENAI_API_KEY environment variable.
+    api_key = args.openai_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        import tomllib
-        with open(args.config, "rb") as f:
-            cfg = tomllib.load(f)
-        api_key = cfg.get("admin", {}).get("ai", {}).get("api_key")
-    if not api_key:
-        print("ERROR: no OpenAI API key. Pass --openai-key or set [admin.ai].api_key in config.")
+        print("ERROR: no OpenAI API key. Pass --openai-key or set OPENAI_API_KEY.")
         return 2
 
     openai_client = OpenAI(api_key=api_key)
@@ -424,7 +420,6 @@ def main() -> None:
     p.add_argument("--url", default="http://127.0.0.1:18081/mcp")
     p.add_argument("--token", required=True, help="MCP bearer token")
     p.add_argument("--server", default="Wiki-topics")
-    p.add_argument("--config", default="config.toml", help="Path to config.toml (for OpenAI key)")
     p.add_argument("--openai-key", default=None, help="Override OpenAI API key")
     p.add_argument("--model", default="gpt-4o-mini")
     p.add_argument("--report", default="llm_smoke_report.md")

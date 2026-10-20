@@ -354,6 +354,34 @@ class TestActionConfirmRecheck(unittest.TestCase):
         self.assertIn("read-only", str(ctx.exception))
         call.assert_not_called()
 
+    def test_confirmation_is_bound_to_the_preparing_bearer_token(self):
+        import json
+        from unittest.mock import patch
+        from mcp.server.auth.middleware.auth_context import auth_context_var
+        from mcp.server.auth.middleware.bearer_auth import AuthenticatedUser
+        from mcp.server.auth.provider import AccessToken
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        def as_caller(token):
+            return auth_context_var.set(AuthenticatedUser(AccessToken(token=token, client_id="c", scopes=[])))
+
+        cfg, mgr, prepare, confirm = self._tools()
+        reset = as_caller("token-a")
+        try:
+            prepared = json.loads(asyncio.run(prepare(action="host.update", params={"hostid": "1"})))
+        finally:
+            auth_context_var.reset(reset)
+
+        reset = as_caller("token-b")
+        try:
+            with patch.object(mgr, "call", return_value={"hostids": ["1"]}) as call:
+                with self.assertRaises(ToolError) as ctx:
+                    asyncio.run(confirm(confirmation_token=prepared["confirmation_token"]))
+        finally:
+            auth_context_var.reset(reset)
+        self.assertIn("different caller", str(ctx.exception))
+        call.assert_not_called()
+
 
 class TestImportRulesNormalization(unittest.TestCase):
     def test_snake_to_camel_basic(self):

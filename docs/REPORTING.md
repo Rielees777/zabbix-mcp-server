@@ -2,7 +2,7 @@
 
 > **Status: BETA**
 >
-> Server-side PDF reporting was introduced in v1.16. The 4 built-in templates are stable, but the authoring API, the set of context variables, and the admin editor UI are still evolving. Feedback (what's missing, what's confusing, what should be configurable) is very welcome at [issues](https://github.com/initMAX/zabbix-mcp-server/issues).
+> Server-side PDF reporting was introduced in v1.16. The 4 built-in templates are stable, but the set of context variables and the template inventory are still evolving. Feedback (what's missing, what's confusing, what should be configurable) is very welcome at [issues](https://github.com/initMAX/zabbix-mcp-server/issues).
 >
 > **Why server-side reports?** LLMs cannot reliably produce consistent, well-formatted reports on their own. Templates make the output deterministic: the model picks the report type and parameters, the server fetches data from Zabbix, fills a Jinja2 template, and renders it to PDF. Same input -> same output, every time.
 
@@ -12,13 +12,11 @@
 - [Built-in templates](#built-in-templates)
 - [The `report_generate` MCP tool](#the-report_generate-mcp-tool)
 - [Branding](#branding)
-- [Custom templates](#custom-templates)
-  - [Authoring with the admin portal](#authoring-with-the-admin-portal)
-  - [Authoring by hand](#authoring-by-hand)
+- [Templates](#templates)
+  - [Adding a template to the package](#adding-a-template-to-the-package)
   - [Available context variables](#available-context-variables)
   - [CSS classes provided by `base.html`](#css-classes-provided-by-basehtml)
   - [Worked example: simple problems summary](#worked-example-simple-problems-summary)
-- [Migration: `/var/log` -> `/etc/zabbix-mcp/templates`](#migration-varlog---etczabbix-mcptemplates)
 - [Limitations and roadmap](#limitations-and-roadmap)
 
 ---
@@ -36,7 +34,6 @@ LLM call -> report_generate tool
               |
               v
        Jinja2 template (HTML)              <- /src/zabbix_mcp/reporting/templates/
-              |                                or /etc/zabbix-mcp/templates/ (custom)
               v
        WeasyPrint -> PDF bytes
               |
@@ -52,7 +49,6 @@ Key files in the source tree:
 | `src/zabbix_mcp/reporting/data_fetcher.py` | One `fetch_<type>_data()` per report type |
 | `src/zabbix_mcp/reporting/templates/base.html` | Common layout, CSS, header/footer, page numbering |
 | `src/zabbix_mcp/reporting/templates/*.html` | One Jinja2 template per built-in report type |
-| `src/zabbix_mcp/admin/views/templates.py` | Admin portal CRUD + Jinja2 preview with sample data |
 
 Required Python packages: `jinja2`, `weasyprint`. Install with the optional extra:
 
@@ -104,20 +100,19 @@ report_generate(
 
 The base64 payload can be saved as a `.pdf` file by the client. Most LLM frontends will offer a download link automatically when they see a PDF data URI in the tool output.
 
-**Authorization:** the call requires the same scope as `host_get` (the underlying API calls fetch hosts, items, events, and trends; a token without monitoring read access cannot generate reports).
-
 ---
 
 ## Branding
 
-Three optional `[server]` keys control the look of the report header:
+Three optional environment variables control the look of the report header:
 
-```toml
-[server]
-report_logo     = "/etc/zabbix-mcp/logo.png"     # PNG, JPG, JPEG, or SVG
-report_company  = "ACME Corp"                    # appears in <h1>: "ACME Corp / Availability Report"
-report_subtitle = "IT Monitoring Service"        # small subtitle in the header
+```bash
+ZABBIX_MCP_SERVER__REPORT_LOGO=/etc/zabbix-mcp/logo.png      # PNG, JPG, JPEG, or SVG
+ZABBIX_MCP_SERVER__REPORT_COMPANY="ACME Corp"                # appears in <h1>: "ACME Corp / Availability Report"
+ZABBIX_MCP_SERVER__REPORT_SUBTITLE="IT Monitoring Service"   # small subtitle in the header
 ```
+
+In a container, mount the logo file (a ConfigMap or an image layer) and point `REPORT_LOGO` at it.
 
 **Logo handling:** the engine reads the file at startup, base64-encodes it, and embeds it as a data URI - so the file path does not need to be readable by WeasyPrint at render time. Symlinks are rejected (TOCTOU protection) and the extension allowlist is `.png`, `.jpg`, `.jpeg`, `.svg`.
 
@@ -125,47 +120,16 @@ The `company` value can be overridden per-call by passing the `company` argument
 
 ---
 
-## Custom templates
+## Templates
 
-### Authoring with the admin portal
+Reports are rendered from the HTML templates shipped in `src/zabbix_mcp/reporting/templates/`. Templates are no longer uploaded or registered at run time (that needed the removed admin portal and a writable config file); to change or add one, edit the package.
 
-The recommended flow:
+### Adding a template to the package
 
-1. Open the admin portal (`http://<host>:9090`) -> **Templates**.
-2. Click **Create new** (or **Duplicate** on a built-in to start from a working template).
-3. Edit in the GrapesJS visual editor (drag & drop blocks: Header, Title, Info Table, Host Table, SLA Gauge, Graph) or switch to the **HTML** tab for direct Jinja2.
-4. Use **Preview** for a server-side render with sample data and the initMAX logo as a fallback.
-5. Save - the portal writes the HTML to `/etc/zabbix-mcp/templates/<name>.html` and adds a `[report_templates.<name>]` section to `config.toml`.
-6. Click **Restart** when the badge appears to load the new template into the running server.
-
-### Authoring by hand
-
-If you prefer to work outside the portal:
-
-1. Create the HTML file in `/etc/zabbix-mcp/templates/`:
-
-   ```bash
-   sudo install -m 640 -o zabbix-mcp -g zabbix-mcp my_template.html /etc/zabbix-mcp/templates/
-   ```
-
-2. Register it in `config.toml`:
-
-   ```toml
-   [report_templates.my_custom]
-   display_name  = "My Custom Report"
-   description   = "Brief description shown in the admin portal"
-   template_file = "/etc/zabbix-mcp/templates/my_custom.html"
-   ```
-
-3. Restart the server:
-
-   ```bash
-   sudo systemctl restart zabbix-mcp-server
-   ```
-
-   The startup log should show `Loaded N custom report templates`.
-
-> **Important:** custom templates registered via `[report_templates.*]` reuse the existing built-in **data fetchers**. The fetcher is selected by the `report_type` you pass to `report_generate`. There is currently no way to register a custom fetcher from the config - if your template needs different data, you will need to base it on the same context that one of the built-in fetchers produces. Custom data fetchers are tracked in the [roadmap](#limitations-and-roadmap).
+1. Create `src/zabbix_mcp/reporting/templates/<name>.html` extending `base.html`.
+2. Register it in `_REPORT_TEMPLATES` in `src/zabbix_mcp/reporting/engine.py`.
+3. A template reuses the existing **data fetchers**: the fetcher is selected by the `report_type` you pass to `report_generate`. If the template needs different data, add a `fetch_<type>_data()` to `data_fetcher.py` as well.
+4. Rebuild the image / reinstall the package.
 
 ### Available context variables
 
@@ -269,33 +233,7 @@ A minimal custom template that lists problem counts per host. It reuses the `ava
 {% endblock %}
 ```
 
-Save as `/etc/zabbix-mcp/templates/problems_summary.html`, register it:
-
-```toml
-[report_templates.problems_summary]
-display_name  = "Problems Summary"
-description   = "Top noisy hosts by event count"
-template_file = "/etc/zabbix-mcp/templates/problems_summary.html"
-```
-
-Restart the server. The new template appears in the admin portal next to the built-ins.
-
----
-
-## Migration: `/var/log` -> `/etc/zabbix-mcp/templates`
-
-Versions **v1.16** stored custom templates in `/var/log/zabbix-mcp/templates/` - an oversight from the beta release (config files do not belong in a log directory). From **v1.17** custom templates live in `/etc/zabbix-mcp/templates/`.
-
-The installer migrates automatically on `sudo ./deploy/install.sh update`:
-
-1. Creates `/etc/zabbix-mcp/templates/` with `zabbix-mcp:zabbix-mcp` ownership and `0750` permissions.
-2. Moves every `*.html` from the old location to the new one (preserving timestamps, setting `0640` mode).
-3. Rewrites `template_file` paths in `config.toml`'s `[report_templates.*]` sections via tomlkit (preserves comments and formatting).
-4. Removes the now-empty old directory.
-
-The migration is **idempotent** - safe to re-run, no-op if there is nothing to migrate. If a file with the same name already exists in the new location, the source is left in place and a warning is printed so you can resolve it manually.
-
-After the update, verify your templates show up in the admin portal and that `report_generate` still works.
+Save it as `src/zabbix_mcp/reporting/templates/problems_summary.html` and register it as described above.
 
 ---
 
@@ -303,16 +241,14 @@ After the update, verify your templates show up in the admin portal and that `re
 
 **Current limitations:**
 
-- Custom **data fetchers** cannot be registered from config - you can only swap the HTML template, not what data is loaded.
+- Templates and data fetchers are part of the package; they cannot be added at run time.
 - The `period` argument is limited to a single suffix (`"30d"`, `"7d"`, `"24h"`); explicit `period_from` / `period_to` cannot be passed from the LLM.
 - The `backup` fetcher uses heuristic key/trigger matching - works for common backup tools but may need a `backup_item_key` override for unusual setups (currently only settable from a Python call, not the MCP tool).
-- The visual editor (GrapesJS) covers a fixed set of blocks; complex layouts still require switching to the HTML tab.
 - Internationalization is limited - templates are English-only and date formats are fixed UTC.
 
 **Planned improvements:**
 
-- Pluggable custom data fetchers (declared in config or a Python entry point).
-- Richer block library in the visual editor.
+- Pluggable templates and data fetchers (a Python entry point).
 - Optional caching of fetched data so subsequent renders are cheap.
 - Localized date/time formatting and translatable labels.
 - Built-in template for SLA reports based on Zabbix Services / SLA API.

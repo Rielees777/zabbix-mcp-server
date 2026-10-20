@@ -15,139 +15,91 @@ We will acknowledge your report within 48 hours and work with you on a fix.
 
 ## Security Considerations
 
-### MCP Token Authentication
+### Secrets
 
-- Multi-token support via `[tokens.*]` sections in `config.toml` — each token is a named entry with independent permissions
-- Tokens stored as SHA-256 hashes — raw tokens shown only once at creation, never stored
-- **Scopes** — restrict which tool groups a token can access (e.g. `monitoring`, `alerts`)
-- **Server binding** — restrict which Zabbix servers a token can reach (`allowed_servers`)
-- **IP allowlist** — restrict token usage to specific IPs or CIDR ranges (`allowed_ips`)
-- **Expiry** — set `expires_at` (ISO 8601) for automatic token expiration
-- **Read-only flag** — per-token write protection independent of server-level `read_only`
-- **Revocation** — tokens can be revoked instantly via the admin portal; revoked tokens are rejected immediately
-- Legacy `auth_token` automatically migrated to `[tokens.legacy]` on first v1.16 start
+- All configuration comes from `ZABBIX_MCP_*` environment variables (or files in a secrets directory); there is no config file holding credentials on disk
+- Credentials - Zabbix API tokens and passwords, the MCP bearer token, the SMTP password - are held as pydantic `SecretStr` values: they are masked in `repr`, log lines and validation errors
+- In Kubernetes inject them from HashiCorp Vault (Vault Agent Injector, Vault Secrets Operator or External Secrets); see [`deploy/k8s/`](deploy/k8s/). The server never contacts Vault itself, so it needs no Vault credentials of its own
+- Settings are read once at start-up; rotate a secret by restarting the pods
+- Keep `.env` out of version control (`.gitignore` and `.dockerignore` already exclude it) and out of images
 
-### Zabbix API Tokens
+### MCP Client Authentication
 
-- Zabbix API tokens stored in `config.toml` should be protected with file permissions (`chmod 600`)
-- The install script sets these permissions automatically — config directory is `chmod 750`
-- Use environment variable references (`${ENV_VAR}`) to avoid storing tokens in plain text
-- Tokens inherit the permissions of the Zabbix user they belong to — use the principle of least privilege
+- One static bearer token (`ZABBIX_MCP_SERVER__AUTH_TOKEN`) protects the HTTP and SSE endpoints; it is compared in constant time
+- `ZABBIX_MCP_SERVER__AUTH_TOKEN_EXPIRES_AT` makes the token temporary: after that moment every request is rejected
+- There are no per-client scopes: the token opens every tool enabled by `TOOLS` / `DISABLED_TOOLS`. Run separate instances (separate token, tool list and Zabbix credentials) for separate audiences
+- `action_confirm` only accepts a confirmation token prepared by the same bearer token
+- `raw_json=true` (drops the prompt-injection marker from responses) is refused unless the operator sets `ZABBIX_MCP_SERVER__ALLOW_RAW_JSON=true`
+- Without a token the server is unauthenticated; the start-up log warns when it is bound to anything but localhost
 
-### Legacy password login (Zabbix 5.0 / 5.2 only, v1.37+)
+### Zabbix Credentials
 
-Zabbix 5.0 and 5.2 have no API tokens (introduced in 5.4) and are out of upstream support. For those two releases only, a `[zabbix.X]` entry may authenticate with `username`/`password` via `user.login` - which means the MCP server holds a **user password** in its configuration instead of a revocable, scoped token. This is a deliberate, operator-chosen security risk and the whole path is best effort: it is not in our test matrix. The fences:
+Zabbix API tokens inherit the permissions of their Zabbix user - use a dedicated, least-privilege user per server.
 
-- It must be switched on explicitly with `legacy_auth = true`. A `username`/`password` pair without the flag is a configuration error, never a fallback, so password login cannot creep into an entry by omission.
-- `legacy_auth` and `api_token` on the same entry is refused, so an entry carries exactly one credential.
-- **Version lock:** on connect the server reads `apiinfo.version` and refuses legacy login against Zabbix 5.4 or newer. The same check runs in the admin portal's "Test connection". The flag therefore cannot be used to avoid tokens on a release that has them.
-- The `zabbix-utils` version gate (refuses < 6.0) is relaxed only for entries marked `legacy_auth`, never for token authentication.
-- Every start logs a `WARNING` per legacy entry naming the Zabbix version; the admin portal shows a red warning on the server card and in the Add / Edit form.
-- The password is never sent back to the browser (edit form shows "leave empty to keep"), is not echoed into a form re-render on a validation error, is not logged, and supports `${ENV_VAR}` so it can live in the environment rather than the file. The same `chmod 600` advice as for tokens applies.
-- Use a dedicated low-privilege Zabbix user and keep `read_only = true` unless writes are genuinely required. The `user.login` session expires; the server re-authenticates when Zabbix reports it, so no long-lived session is kept alive on purpose.
+Zabbix 5.0 and 5.2 have no API tokens (introduced in 5.4) and are out of upstream support. For those two releases only, a Zabbix server entry may authenticate with `USERNAME`/`PASSWORD` via `user.login` - which means the MCP server holds a **user password** instead of a revocable, scoped token. This is a deliberate, operator-chosen security risk and the whole path is best effort: it is not in our test matrix. The fences:
 
-### Admin Portal Security
-
-- Session-based authentication with scrypt password hashing (n=16384, r=8, p=1)
-- Session cookies: `HttpOnly`, `SameSite=Strict`, `Secure` (on HTTPS) - prevents XSS and CSRF
-- Login rate limiting: 5 attempts per 5 minutes per IP, 30-second lockout
-- POST rate limiting: 30 requests per minute per session
-- Password policy: minimum 10 characters, at least one uppercase letter and one digit
-- Role-based access control: admin (full), operator (tokens/templates), viewer (read-only)
-- OAuth-issued tokens carry the portal role of the user who consented: a `viewer`'s token is read-only at the MCP server (`TokenInfo.read_only`), whatever scopes were granted; `operator` and `admin` tokens may write. An unknown or missing role is treated as read-only. **Before v1.37.3 every OAuth token was writable** - the scope cap kept a viewer to `monitoring` / `extensions`, but `monitoring` includes host, item and trigger create / update / delete, so a viewer could write to any server not set `read_only = true`. Demoting a user does not shrink tokens already issued to them; revoke the client's tokens from the portal.
-- MCP resources (`zabbix://<server>/hosts`, `/problems`, `/hostgroups`, `/templates`) run the same token authorization check as the tools (server binding and scope) since v1.37.3; before, they bypassed it.
-- Jinja2 autoescape enabled on all templates - prevents XSS
-- Config write-back uses atomic file operations with `threading.RLock`
-
-### OAuth 2.1 Authorization Server (v1.28+)
-
-- Authorization Code grant + PKCE S256 (mandatory; non-PKCE clients refused at startup)
-- RFC 8707 audience binding: every issued access token's `aud` is bound to `[server].public_url`; tokens issued for one MCP deployment cannot be replayed against another
-- Dynamic client registration (RFC 7591) - off via `[oauth].dynamic_registration_enabled = false` if you do not want untrusted callers registering clients
-- Login rate limit on `/oauth/login`: 5 failed attempts per IP per 5-minute rolling window (parity with admin portal `/login`)
-- Login uses the existing `[admin.users.*]` table (scrypt-hashed) - no second identity store
-- Authorization codes are one-shot, 10-minute TTL, in-memory
-- Refresh tokens rotated on each use (OAuth 2.1 §4.3.1)
-- Issuer URL must be HTTPS for non-localhost bindings (RFC 8414); the framework refuses to start otherwise
-- Full setup walkthrough including reverse-proxy patterns (Apache, Nginx, Caddy) in [`docs/OAUTH.md`](docs/OAUTH.md)
+- It has to be switched on explicitly with `LEGACY_AUTH=true`; a `USERNAME`/`PASSWORD` pair without the flag is a configuration error, never a silent fallback.
+- `LEGACY_AUTH` and `API_TOKEN` on the same entry is refused, so an entry carries exactly one credential.
+- **Version lock:** on connect the server reads `apiinfo.version` and refuses legacy login against Zabbix 5.4 or newer, so the flag cannot be used to avoid tokens on a release that has them.
+- The `zabbix-utils` version gate (refuses < 6.0) is relaxed only for entries marked `LEGACY_AUTH`, never for token authentication.
+- Every start logs a `WARNING` per legacy entry naming the Zabbix version.
 
 ### Network Security
 
-- The server binds to `127.0.0.1` (localhost) by default — not accessible from the network
-- If you bind to `0.0.0.0`, always configure MCP token authentication to protect the endpoint
-- Native TLS support — set `tls_cert_file` and `tls_key_file` in config, or use a reverse proxy (nginx, Caddy)
-- IP allowlist — set `allowed_hosts` to restrict access to specific IPs or CIDR ranges
-- CORS control — set `cors_origins` to restrict which web origins may access the server; omit to disable CORS entirely
-- The `rate_limit` config option protects the Zabbix API from being overwhelmed (default: 300 calls/minute per client)
-- SSRF prevention — server test endpoint validates URL scheme and resolves DNS to block private/loopback/reserved IPs
+- The server binds to `127.0.0.1` (localhost) by default - not accessible from the network
+- If you bind to `0.0.0.0`, always configure the bearer token to protect the endpoint
+- Native TLS support - set `TLS_CERT_FILE` and `TLS_KEY_FILE`, or terminate TLS at a reverse proxy / Ingress
+- IP allowlist - set `ALLOWED_HOSTS` to restrict access to specific IPs or CIDR ranges
+- CORS control - set `CORS_ORIGINS` to restrict which web origins may access the server; omit to disable CORS entirely
+- `RATE_LIMIT` protects the Zabbix API from being overwhelmed (default: 300 calls/minute per client)
 
 ### Origin / Host validation (DNS rebinding protection)
 
 Per the MCP spec (2025-11-25 and later), the server can reject requests whose `Origin` or `Host` header does not match the operator-declared allowlist (returns HTTP 403 / 421 respectively). This blocks DNS rebinding attacks against an MCP endpoint reachable from a browser context.
 
-**Recommended minimum configuration for production**: set `[server].public_url` to the externally-reachable URL of the server, e.g.
+**Recommended minimum configuration for production**: set `ZABBIX_MCP_SERVER__PUBLIC_URL` to the externally-reachable URL of the server, e.g. `https://mcp.example.com`. The host is auto-added to the Host allowlist, the origin to the Origin allowlist, and DNS-rebinding protection flips on.
 
-```toml
-[server]
-public_url = "https://mcp.example.com"
-```
+For additional origins set `ZABBIX_MCP_SERVER__ALLOWED_ORIGINS`, e.g. `https://app.example.com,https://office.example.com:*`.
 
-The host (`mcp.example.com`) is auto-added to the Host allowlist, the origin (`https://mcp.example.com`) to the Origin allowlist, and DNS-rebinding protection flips on. No further config needed for the typical reverse-proxy deployment.
-
-For additional origins (e.g. an internal admin dashboard at a different URL), populate `[server].allowed_origins`:
-
-```toml
-allowed_origins = ["https://app.example.com", "https://office.example.com:*"]
-```
-
-When `public_url`, `allowed_origins`, and `allowed_hosts` are all unset on a non-localhost bind, protection stays off (backwards compat) and the server logs a startup warning pointing here.
+When `PUBLIC_URL`, `ALLOWED_ORIGINS` and `ALLOWED_HOSTS` are all unset on a non-localhost bind, protection stays off and the server logs a startup warning pointing here.
 
 ### Read-Only Mode
 
-- Servers are configured as `read_only = true` by default
+- Zabbix servers are `READ_ONLY=true` by default
 - This blocks all write operations (create, update, delete, execute) at the MCP server level, including via the `zabbix_raw_api_call` tool
-- Per-token `read_only` flag provides additional write protection
-- Two-step action approval (`action_prepare` + `action_confirm`) for write operations — 5-minute confirmation window
-- Set `read_only = false` only on servers where you explicitly need write access
+- Two-step action approval (`action_prepare` + `action_confirm`) for write operations - 5-minute confirmation window, and the read-only flag is checked again at confirmation
+- Set `READ_ONLY=false` only on servers where you explicitly need write access
 
-### File Access and Uploads
+### File Access
 
 - The `source_file` feature (for `configuration.import`) is disabled by default
-- To enable it, configure `allowed_import_dirs` with specific directories from which files may be read
-- Path traversal is blocked — only files within configured directories are accessible, validated with `Path.is_relative_to()`
-- Symlinks are judged by where they resolve, not by being links: the path is resolved first, the containment check runs on the resolved target, the file is opened with `O_NOFOLLOW` (so a symlink swapped in as the final path component after the check is refused), and `fstat` then insists on a regular file (a directory, FIFO or device under an allowed directory is never read). A link inside an allowed directory is readable; one pointing outside is refused by the containment check. This narrows the check-to-open window rather than closing it: a directory symlink introduced higher up the path in that window would still be followed, and hard links are invisible to resolution. Both require write access to a directory under `allowed_import_dirs` on the host, which is why those directories should be writable only by the operator
-- SVG uploads sanitized: script tags, event handlers, javascript: URLs, and dangerous data URIs stripped
-- TLS private keys saved with `0600` permissions; TLS directory `0750`
-- Report template preview uses `SandboxedEnvironment` — prevents server-side template injection (SSTI)
+- To enable it, set `ZABBIX_MCP_SERVER__ALLOWED_IMPORT_DIRS` to specific directories from which files may be read
+- Path traversal is blocked - only files within configured directories are accessible, validated with `Path.is_relative_to()`
+- Symlinks are judged by where they resolve, not by being links: the path is resolved first, the containment check runs on the resolved target, the file is opened with `O_NOFOLLOW` (so a symlink swapped in as the final path component after the check is refused), and `fstat` then insists on a regular file (a directory, FIFO or device under an allowed directory is never read). This narrows the check-to-open window rather than closing it: a directory symlink introduced higher up the path in that window would still be followed, and hard links are invisible to resolution. Both require write access to a directory under `ALLOWED_IMPORT_DIRS`, which is why those directories should be writable only by the operator
+- Report templates are the ones built into the package and render in a `SandboxedEnvironment`, which prevents server-side template injection
 
 ### Report Delivery (v1.35+)
 
 `report_generate` can hand a finished PDF to a resource link, the filesystem, or a mailbox instead of returning it inline. All three are reachable from an AI client, so all three are fenced by the operator.
 
-**Resource links** (`zabbix://reports/<id>`) hold the PDF in memory between the tool call and `resources/read`. The id is a random 122-bit token (uuid4 hex), not a filename or a sequence number, so links cannot be guessed or enumerated. Reads go through the same authenticated MCP endpoint as every other request - a link is not a public URL. The store is bounded by `[reporting].link_ttl` (default 1 h, max 24 h) and `[reporting].link_max_reports` (default 20, oldest evicted first), so a client cannot pin memory by generating reports it never fetches.
+**Resource links** (`zabbix://reports/<id>`) hold the PDF in memory between the tool call and `resources/read`. The id is a random 122-bit token (uuid4 hex), not a filename or a sequence number, so links cannot be guessed or enumerated. Reads go through the same authenticated MCP endpoint as every other request - a link is not a public URL. The store is bounded by `ZABBIX_MCP_REPORTING__LINK_TTL` (default 1 h, max 24 h) and `ZABBIX_MCP_REPORTING__LINK_MAX_REPORTS` (default 20, oldest evicted first), so a client cannot pin memory by generating reports it never fetches.
 
-**Download URLs** (`GET /reports/<id>.pdf`, v1.36+, on by default) publish the same report at an ordinary URL so a person can open it in a browser. This is a **capability URL**: the same random 122-bit id (uuid4) is the only credential, and the route is deliberately unauthenticated because an AI client hands the link to a human who has no bearer token. That trade is bounded by the link lifetime (`link_ttl`), the store cap, and the fact that one id yields exactly one report. Responses carry `Content-Disposition: attachment`, `Cache-Control: no-store, private`, `Referrer-Policy: no-referrer` (so the id does not leak through a `Referer` header) and `X-Content-Type-Options: nosniff`. Set `[reporting].download_urls = false` to serve the MCP resource link only.
+**Download URLs** (`GET /reports/<id>.pdf`, v1.36+, on by default) publish the same report at an ordinary URL so a person can open it in a browser. This is a **capability URL**: the same random 122-bit id (uuid4) is the only credential, and the route is deliberately unauthenticated because an AI client hands the link to a human who has no bearer token. That trade is bounded by the link lifetime (`LINK_TTL`), the store cap, and the fact that one id yields exactly one report. Responses carry `Content-Disposition: attachment`, `Cache-Control: no-store, private`, `Referrer-Policy: no-referrer` (so the id does not leak through a `Referer` header) and `X-Content-Type-Options: nosniff`. Set `ZABBIX_MCP_REPORTING__DOWNLOAD_URLS=false` to serve the MCP resource link only.
 
-A URL is only built from an address somebody explicitly vouched for: `[server].public_url`, or `X-Forwarded-Host` / `-Proto` sent by a peer listed in `[server].trusted_proxies`. Nothing is inferred - not from the local bind, and not from a bare `Host` header. Both would resolve to loopback in the very deployment where a link matters (a server bound to `127.0.0.1` behind a proxy; with no host allowlist configured the MCP SDK also rejects any non-loopback `Host` outright), and a remote user handed `http://127.0.0.1:8080/reports/<id>.pdf` would send a live report id to whatever answers on their own machine. A forwarded value is accepted only as a bare authority, so no header can smuggle a path, a query or a second origin into the link; the *last* element of a forwarded chain is taken, since a proxy that appends leaves the client's own value in front. No URL is emitted on stdio transport either - there is no HTTP listener.
+A URL is only built from an address somebody explicitly vouched for: `ZABBIX_MCP_SERVER__PUBLIC_URL`, or `X-Forwarded-Host` / `-Proto` sent by a peer listed in `ZABBIX_MCP_SERVER__TRUSTED_PROXIES`. Nothing is inferred - not from the local bind, and not from a bare `Host` header. Both would resolve to loopback in the very deployment where a link matters (a server bound to `127.0.0.1` behind a proxy; with no host allowlist configured the MCP SDK also rejects any non-loopback `Host` outright), and a remote user handed `http://127.0.0.1:8080/reports/<id>.pdf` would send a live report id to whatever answers on their own machine. A forwarded value is accepted only as a bare authority, so no header can smuggle a path, a query or a second origin into the link; the *last* element of a forwarded chain is taken, since a proxy that appends leaves the client's own value in front. No URL is emitted on stdio transport either - there is no HTTP listener.
 
-The route is served outside the MCP endpoint's `TransportSecuritySettings`, so it carries no `Host` / `Origin` validation and no bearer requirement. Unless `[server].cors_origins` is configured - which wraps the whole application, this route included - it emits no CORS headers, so a hostile page cannot read a response even if it guessed an id. Serving these links over plaintext HTTP on a non-loopback bind logs a startup warning - the id travels as a bearer credential and the PDF is unencrypted in transit. Because the download route is served by the MCP backend, a reverse proxy that forwards an explicit list of paths must include `/reports/`.
+The route is served outside the MCP endpoint's `TransportSecuritySettings`, so it carries no `Host` / `Origin` validation and no bearer requirement. Unless `ZABBIX_MCP_SERVER__CORS_ORIGINS` is configured - which wraps the whole application, this route included - it emits no CORS headers, so a hostile page cannot read a response even if it guessed an id. Serving these links over plaintext HTTP on a non-loopback bind logs a startup warning - the id travels as a bearer credential and the PDF is unencrypted in transit. Because the download route is served by the MCP backend, a reverse proxy that forwards an explicit list of paths must include `/reports/`.
 
-**Filesystem** delivery is refused unless `[reporting].output_dir` names an absolute, existing directory. The AI client cannot supply a path or a filename: the name is generated server-side from report type, host group and timestamp, sanitised to `[A-Za-z0-9._-]`, and the resolved target is asserted to stay inside the configured directory before the write. Files are written `0640`.
+**Filesystem** delivery is refused unless `ZABBIX_MCP_REPORTING__OUTPUT_DIR` names an absolute, existing directory. The AI client cannot supply a path or a filename: the name is generated server-side from report type, host group and timestamp, sanitised to `[A-Za-z0-9._-]`, and the resolved target is asserted to stay inside the configured directory before the write. Files are written `0640`.
 
-**Email** delivery is refused unless `[reporting.email].enabled` is set **and** the recipient matches `allowed_recipients`. The allowlist is mandatory - the config loader and the admin form both refuse to enable email without it, because an LLM that can pick an arbitrary recipient is an exfiltration channel for monitoring data. Entries are exact addresses or `*@domain` globs; `*` disables the restriction entirely and should be a deliberate choice. Attachments are capped at 25 MB and SMTP failures are reported without echoing credentials. The SMTP password is stored in `config.toml` under the same `0640` permissions as the rest of the file, supports `${ENV_VAR}` indirection, and is never sent to the admin portal's browser session.
-
-### Audit Logging
-
-- All admin portal actions logged to `/var/log/zabbix-mcp/audit.log` (JSON lines)
-- Tracked actions: login, logout, token CRUD, user CRUD, server CRUD, settings changes, uploads
-- Log rotation at 50 MB with backup scheme
-- Audit log viewable and exportable (CSV) via admin portal
+**Email** delivery is refused unless `ZABBIX_MCP_REPORTING__EMAIL__ENABLED` is set **and** the recipient matches `ALLOWED_RECIPIENTS`. The allowlist is mandatory - the settings loader refuses to enable email without it, because an LLM that can pick an arbitrary recipient is an exfiltration channel for monitoring data. Entries are exact addresses or `*@domain` globs; `*` disables the restriction entirely and should be a deliberate choice. Attachments are capped at 25 MB and SMTP failures are reported without echoing credentials. The SMTP password is a secret setting (`SecretStr`): it comes from the environment or Vault and is masked in logs and error messages.
 
 ## Supported Versions
 
 | Version | Supported |
 |---|---|
-| 1.39 (latest) | Yes |
+| 2.0 (latest) | Yes |
+| 1.39 | Yes |
 | 1.38 | Yes |
 | 1.37.4 | Yes |
 | 1.37.3 | Yes |
@@ -165,4 +117,4 @@ The route is served outside the MCP endpoint's `TransportSecuritySettings`, so i
 | 1.30 | Yes |
 | < 1.30 | No |
 
-Versions older than 1.30 no longer receive fixes - upgrade with `./deploy/install.sh update` (or `pip install --upgrade zabbix-mcp-server`); config and tokens are preserved across updates.
+Versions older than 1.30 no longer receive fixes. Note that 2.0 changed how the server is configured (environment variables instead of `config.toml`, no admin portal) - see the changelog before upgrading.

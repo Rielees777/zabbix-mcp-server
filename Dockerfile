@@ -32,7 +32,7 @@ LABEL org.opencontainers.image.url="https://github.com/initMAX/zabbix-mcp-server
 LABEL org.opencontainers.image.documentation="https://github.com/initMAX/zabbix-mcp-server/blob/main/README.md"
 LABEL org.opencontainers.image.vendor="initMAX s.r.o."
 LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
-LABEL org.opencontainers.image.version="1.39"
+LABEL org.opencontainers.image.version="2.0"
 
 # System libs for weasyprint PDF rendering
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,23 +40,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libffi8 shared-mime-info \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd --system --shell /usr/sbin/nologin --home-dir /opt/zabbix-mcp zabbix-mcp \
-    && mkdir -p /var/log/zabbix-mcp /etc/zabbix-mcp \
-    && mkdir -p /etc/zabbix-mcp/assets /etc/zabbix-mcp/tls /etc/zabbix-mcp/templates \
-    && chown zabbix-mcp:zabbix-mcp /var/log/zabbix-mcp /etc/zabbix-mcp \
-    && chown zabbix-mcp:zabbix-mcp /etc/zabbix-mcp/assets /etc/zabbix-mcp/tls /etc/zabbix-mcp/templates \
-    && chmod 750 /etc/zabbix-mcp/tls /etc/zabbix-mcp/templates
+RUN useradd --system --shell /usr/sbin/nologin --home-dir /opt/zabbix-mcp zabbix-mcp
 
 COPY --from=builder /opt/zabbix-mcp/venv /opt/zabbix-mcp/venv
 
 ENV PATH="/opt/zabbix-mcp/venv/bin:$PATH"
 
+# All settings come from ZABBIX_MCP_* environment variables (see .env.example);
+# Vault-rendered files in /vault/secrets are picked up as well.
+ENV ZABBIX_MCP_SERVER__TRANSPORT=http \
+    ZABBIX_MCP_SERVER__HOST=0.0.0.0 \
+    ZABBIX_MCP_SERVER__PORT=8080
+
 USER zabbix-mcp
 EXPOSE 8080
-EXPOSE 9090
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
 
 ENTRYPOINT ["/opt/zabbix-mcp/venv/bin/zabbix-mcp-server"]
-CMD ["--config", "/etc/zabbix-mcp/config.toml"]

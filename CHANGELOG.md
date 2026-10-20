@@ -1,5 +1,42 @@
 # Changelog
 
+## v2.0 - 2026-10-20
+
+The environment-only release. The server is now configured entirely through `ZABBIX_MCP_*` environment variables, validated with pydantic-settings, and runs without the admin portal. **This is a breaking release: read "Migrating" before upgrading.**
+
+### Changed
+
+- **Configuration comes from the environment, not from `config.toml`.** `config.py` is now a set of pydantic models (`AppConfig`, `ServerConfig`, `ZabbixServerConfig`, `ReportingConfig`, `ReportEmailConfig`) loaded by `pydantic-settings`: prefix `ZABBIX_MCP_`, sections nested with `__` (`ZABBIX_MCP_ZABBIX_SERVERS__PROD__API_TOKEN`), an optional `.env` file for local runs, comma separated or JSON lists. Every validation rule of the old loader moved into the models (URL and host name checks, TLS pair, `public_url` rules, `allowed_origins`, the legacy-auth rules, report email fence); an invalid value stops the start-up with the variable named. A Zabbix server that fails validation is still skipped with a warning instead of taking the others down.
+- **Credentials are `SecretStr`.** Zabbix API tokens and passwords, the frontend password, the bearer token and the SMTP password are masked in `repr`, logs and error messages.
+- **Vault support, without a Vault client.** Files in a secrets directory (`ZABBIX_MCP_SECRETS_DIR`, or `/vault/secrets` when present) are read as the environment variable of the same name in lower case, nested names included; real environment variables win. That covers Vault Agent Injector and CSI mounts, and Vault Secrets Operator / External Secrets work through `envFrom`. Manifests: `deploy/k8s/`.
+- **MCP clients authenticate with one bearer token** (`ZABBIX_MCP_SERVER__AUTH_TOKEN`), optionally temporary: `ZABBIX_MCP_SERVER__AUTH_TOKEN_EXPIRES_AT` makes the server reject it after that moment. The per-Zabbix-server `READ_ONLY` guard stays; `action_confirm` still only accepts a confirmation prepared by the same bearer token.
+- **`raw_json=true` is a server-wide opt-in**, `ZABBIX_MCP_SERVER__ALLOW_RAW_JSON` (replaces the per-token `allow_raw_json` and `stdio_allow_raw_json`).
+- The Docker image runs the HTTP transport on `0.0.0.0:8080` from environment variables, logs to stdout and exposes only port 8080; `docker-compose.yml` loads `.env`. The README is rewritten around this.
+- `timezone` resolution no longer has a token level: Zabbix entry, `ZABBIX_MCP_SERVER__TIMEZONE`, the Zabbix user, the Zabbix frontend default, the host, UTC.
+
+### Removed
+
+- The **admin portal** (port 9090, Client MCP Wizard, audit log, update check, AI template generator, visual template editor), `admin_bootstrap`, `template_migration`.
+- **Multi-token auth and its policies** (`[tokens.*]`: scopes, server binding, IP allowlist per token, per-token read-only, timezone) and the **embedded OAuth 2.1 server** (`[oauth]`, `[oauth_clients.*]`, `docs/OAUTH.md`, `docs/CHATGPT-CUSTOM-APP.md`). Both were managed only from the portal. Need different audiences? Run one instance each.
+- Custom **report templates** uploaded through the portal (`[report_templates.*]`); the built-in templates, report delivery (links, download URLs, files, email) and branding stay.
+- `config.toml` and `config.example.toml`, `deploy/install.sh`, `deploy/install-user.sh` (systemd/host installers), `INSTALL.md`, `.mcp.json.example`, `--config`. `tomlkit` and `tomli` are no longer dependencies; `pydantic-settings` is.
+
+### Migrating
+
+| Before | Now |
+|---|---|
+| `[server] transport/host/port/...` | `ZABBIX_MCP_SERVER__TRANSPORT`, `__HOST`, `__PORT`, ... |
+| `[server] auth_token = "..."` | `ZABBIX_MCP_SERVER__AUTH_TOKEN` |
+| `[zabbix.prod] url/api_token/read_only/...` | `ZABBIX_MCP_ZABBIX_SERVERS__PROD__URL`, `__API_TOKEN`, `__READ_ONLY`, ... |
+| `[reporting]`, `[reporting.email]` | `ZABBIX_MCP_REPORTING__...`, `ZABBIX_MCP_REPORTING__EMAIL__...` |
+| `${ENV_VAR}` references in the file | set the setting itself |
+| `zabbix-mcp-server --config FILE` | `zabbix-mcp-server` (`--check-config` validates the environment) |
+| tokens, OAuth clients, users | one `AUTH_TOKEN` per instance |
+
+### Tests
+
+- Portal, OAuth and token-store tests removed with the code; config tests rewritten for environment loading (secrets masking, CSV/JSON lists, secrets-dir files with env precedence, skipped servers, invalid values); `tests/test_auth.py` covers the bearer verifier and the caller fingerprint; the protocol e2e starts a real server configured purely through the environment.
+
 ## v1.39 - 2026-10-17
 
 The tool-schema release. [#98](https://github.com/initMAX/zabbix-mcp-server/issues/98) ([@Amelkahil](https://github.com/Amelkahil)) and [#79](https://github.com/initMAX/zabbix-mcp-server/issues/79) ([@TPoussCap](https://github.com/TPoussCap)) described the same gap from two sides: a model building a call from `tools/list` alone cannot know which properties `output`, `filter`, `search` and `sortfield` take on *this* method, or which `selectXxx` and native parameters `extra_params` may carry, so it guesses. Checked against Zabbix 7.4.14, guessing fails in a quiet way: an unknown `selectXxx` or top-level parameter, an unknown `output` property and a `filter` on a `text` property are silently ignored (the model believes it filtered), a wrong `sortfield` or a restricted `filter` key is an API error, and that error never reached the model because the server replaced it with "check server logs" (a v1.11 hardening against stack traces that also swallowed Zabbix's own validation message). Thank you both for the precise reports.
