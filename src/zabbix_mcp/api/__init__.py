@@ -31,3 +31,16 @@ ALL_METHODS: list[MethodDef] = [
     *USERS_METHODS,
     *ADMINISTRATION_METHODS,
 ]
+
+# Zabbix API objects that hold user data or user access. No tool is defined
+# for them and ``zabbix_raw_api_call`` refuses them, so the MCP server can
+# neither read nor change users, user groups, directories, roles, tokens or
+# MFA methods in Zabbix.
+BLOCKED_API_OBJECTS: frozenset[str] = frozenset({
+    "user", "usergroup", "userdirectory", "role", "token", "mfa",
+})
+
+
+def is_blocked_api_method(method: str) -> bool:
+    """True when *method* (``object.action``) belongs to a blocked API object."""
+    return method.strip().split(".", 1)[0].strip().lower() in BLOCKED_API_OBJECTS

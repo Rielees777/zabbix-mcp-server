@@ -529,8 +529,9 @@ TOOL_GROUPS: dict[str, list[str]] = {
         "action", "alert", "mediatype", "script",
     ],
     "users": [
-        "user", "usergroup", "userdirectory", "usermacro",
-        "token", "role", "mfa",
+        # User accounts, groups, directories, roles, tokens and MFA are not
+        # exposed at all (see zabbix_mcp.api.BLOCKED_API_OBJECTS).
+        "usermacro",
     ],
     "administration": [
         "settings", "housekeeping", "authentication", "autoregistration",

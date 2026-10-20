@@ -44,7 +44,7 @@ from mcp.types import (
     ToolExecution,
 )
 
-from zabbix_mcp.api import ALL_METHODS
+from zabbix_mcp.api import ALL_METHODS, is_blocked_api_method
 from zabbix_mcp.api.action_payload import strip_correlation_for_write, strip_for_write
 from zabbix_mcp.api.contracts import (
     compact_output_for, contract_for, describe_extra_params, describe_filter,
@@ -1899,6 +1899,12 @@ def _register_tools(
         _raw_err = _check_raw_json_allowed(raw_json)
         if _raw_err:
             raise ToolError(_raw_err)
+
+        if is_blocked_api_method(method):
+            raise ToolError(
+                f"'{method}' is not available: this server does not give access to "
+                f"Zabbix users, user groups, user directories, roles, API tokens or MFA methods."
+            )
 
         server_name = server or _default_server_for_caller(client_manager)
         if not server_name:

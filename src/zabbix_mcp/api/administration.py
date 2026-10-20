@@ -39,8 +39,6 @@ This module covers the "Administration" domain of the Zabbix API:
   the load on the central server and enabling monitoring across firewalls/NAT.
 - **proxygroup**: Logical groupings of proxies for high-availability and
   load-balanced data collection.
-- **mfa**: Multi-factor authentication methods (TOTP, Duo) configured globally
-  and enforced per user group.
 """
 
 from zabbix_mcp.api.types import MethodDef, ParamDef
@@ -641,73 +639,6 @@ _PROXYGROUP_METHODS: list[MethodDef] = [
 ]
 
 # ---------------------------------------------------------------------------
-# mfa
-# ---------------------------------------------------------------------------
-
-_MFA_GET_EXTRA: list[ParamDef] = [
-    ParamDef(
-        "mfaids", "list[str]",
-        "Return only MFA methods with the given IDs.",
-    ),
-]
-
-_MFA_METHODS: list[MethodDef] = [
-    MethodDef(
-        api_method="mfa.get",
-        tool_name="mfa_get",
-        description=(
-            "Retrieve multi-factor authentication methods configured in Zabbix. "
-            "MFA methods define the second factor required at login: TOTP "
-            "(time-based one-time password via apps like Google Authenticator) or "
-            "Duo Universal Prompt. MFA methods are assigned to user groups to "
-            "enforce per-group MFA requirements. Use this to audit which MFA "
-            "methods are available and their configuration."
-        ),
-        read_only=True,
-        compact_fields=("mfaid", "name", "type"),
-        params=COMMON_GET_PARAMS + _MFA_GET_EXTRA,
-    ),
-    MethodDef(
-        api_method="mfa.create",
-        tool_name="mfa_create",
-        description=(
-            "Create a new MFA method. Required fields: 'name' and 'type' "
-            "(1=TOTP, 2=Duo Universal Prompt). For TOTP: optionally set "
-            "'hash_function' (1=SHA-1, 2=SHA-256, 3=SHA-512) and 'code_length' "
-            "(6 or 8). For Duo: 'api_hostname', 'clientid', and 'client_secret' "
-            "are required. After creation, assign the MFA method to user groups "
-            "via usergroup.update."
-        ),
-        read_only=False,
-        params=CREATE_PARAMS,
-    ),
-    MethodDef(
-        api_method="mfa.update",
-        tool_name="mfa_update",
-        description=(
-            "Update an existing MFA method. The params dict must include 'mfaid'. "
-            "Commonly used to change TOTP hash function or code length, update "
-            "Duo API credentials, rename the method, or reconfigure settings. "
-            "Changes affect all user groups using this MFA method."
-        ),
-        read_only=False,
-        params=UPDATE_PARAMS,
-    ),
-    MethodDef(
-        api_method="mfa.delete",
-        tool_name="mfa_delete",
-        description=(
-            "Delete one or more MFA methods by their IDs. User groups referencing "
-            "the deleted MFA method will lose their MFA requirement. Ensure "
-            "alternative MFA methods are assigned to affected groups if MFA "
-            "enforcement is still needed."
-        ),
-        read_only=False,
-        params=DELETE_PARAMS,
-    ),
-]
-
-# ---------------------------------------------------------------------------
 # Public export
 # ---------------------------------------------------------------------------
 
@@ -723,5 +654,4 @@ ADMINISTRATION_METHODS: list[MethodDef] = (
     + _HOUSEKEEPING_METHODS
     + _PROXY_METHODS
     + _PROXYGROUP_METHODS
-    + _MFA_METHODS
 )

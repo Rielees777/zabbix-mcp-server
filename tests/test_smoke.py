@@ -246,7 +246,7 @@ class TestAuth(unittest.TestCase):
 
 class TestAPIRegistry(unittest.TestCase):
     def test_methods_not_empty(self):
-        self.assertGreater(len(ALL_METHODS), 200)
+        self.assertGreater(len(ALL_METHODS), 150)
 
     def test_unique_tool_names(self):
         names = [m.tool_name for m in ALL_METHODS]
@@ -255,6 +255,58 @@ class TestAPIRegistry(unittest.TestCase):
     def test_unique_api_methods(self):
         methods = [m.api_method for m in ALL_METHODS]
         self.assertEqual(len(methods), len(set(methods)))
+
+
+class TestUserDataIsNotExposed(unittest.TestCase):
+    """No tool reads or changes Zabbix users, groups, directories, roles, tokens or MFA."""
+
+    BLOCKED = ("user", "usergroup", "userdirectory", "role", "token", "mfa")
+
+    def _tools(self):
+        from mcp.server.mcpserver import MCPServer
+
+        mgr = ClientManager(_make_config())
+        mcp = MCPServer(name="test")
+        _register_tools(mcp, mgr)
+        return mcp, mgr
+
+    def test_no_tool_or_method_for_blocked_objects(self):
+        mcp, _ = self._tools()
+        names = {t.name for t in mcp._tool_manager.list_tools()}
+        for blocked in self.BLOCKED:
+            self.assertFalse([n for n in names if n.split("_")[0] == blocked], blocked)
+        self.assertFalse([m.api_method for m in ALL_METHODS if m.api_method.split(".")[0] in self.BLOCKED])
+        self.assertIn("usermacro_get", names)  # macros are not user data
+
+    def test_tool_group_no_longer_lists_them(self):
+        from zabbix_mcp.config import TOOL_GROUPS
+        self.assertEqual(TOOL_GROUPS["users"], ["usermacro"])
+
+    def test_raw_call_refuses_every_spelling(self):
+        from unittest.mock import patch
+        from mcp.server.mcpserver.exceptions import ToolError
+
+        mcp, mgr = self._tools()
+        raw = mcp._tool_manager.get_tool("zabbix_raw_api_call").fn
+        with patch.object(mgr, "call") as call:
+            for method in ("user.get", "USER.create", " usergroup.update", "userdirectory.test",
+                           "role.delete", "token.generate", "mfa.get", "user.logout"):
+                with self.subTest(method=method), self.assertRaises(ToolError) as ctx:
+                    asyncio.run(raw(method=method, params={}))
+                self.assertIn("not available", str(ctx.exception))
+            call.assert_not_called()
+
+    def test_raw_call_still_works_for_other_objects(self):
+        from unittest.mock import patch
+
+        mcp, mgr = self._tools()
+        raw = mcp._tool_manager.get_tool("zabbix_raw_api_call").fn
+        with patch.object(mgr, "call", return_value=[]) as call, \
+                patch.object(mgr, "get_version", return_value="7.4.0"), \
+                patch.object(mgr, "get_zabbix_timezone", return_value="UTC"):
+            asyncio.run(raw(method="host.get", params={}))
+            asyncio.run(raw(method="usermacro.get", params={}))
+        self.assertEqual(call.call_count, 2)
 
 
 class TestToolRegistration(unittest.TestCase):
@@ -280,7 +332,7 @@ class TestToolRegistration(unittest.TestCase):
         names = {t.name for t in mcp._tool_manager.list_tools()}
         for expected in [
             "host_get", "problem_get", "trigger_get", "item_get",
-            "event_acknowledge", "template_get", "user_get",
+            "event_acknowledge", "template_get", "usermacro_get",
             "zabbix_raw_api_call", "health_check",
         ]:
             self.assertIn(expected, names)

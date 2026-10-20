@@ -19,7 +19,7 @@
     <a href="https://github.com/initMAX/zabbix-mcp-server/releases"><img alt="Version" src="https://img.shields.io/github/v/release/initMAX/zabbix-mcp-server?color=%231f65f4&label=version"></a>&nbsp;
     <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-AGPL--3.0-blue"></a>&nbsp;
     <img alt="Python" src="https://img.shields.io/badge/python-3.10%2B-blue">&nbsp;
-    <img alt="Tools" src="https://img.shields.io/badge/tools-237-green">&nbsp;
+    <img alt="Tools" src="https://img.shields.io/badge/tools-205-green">&nbsp;
     <img alt="Zabbix" src="https://img.shields.io/badge/zabbix-5.0%E2%80%948.0-red">&nbsp;
     <a href="https://safeskill.dev/scan/initmax-zabbix-mcp-server"><img alt="SafeSkill" src="https://img.shields.io/badge/SafeSkill-100%2F100_Verified%20Safe-brightgreen"></a>&nbsp;
     <a href="https://mcptoplist.com/server/glama%2FinitMAX%2Fzabbix-mcp-server"><img alt="MCP Toplist" src="https://mcptoplist.com/badge/glama%2FinitMAX%2Fzabbix-mcp-server.svg"></a>
@@ -30,7 +30,7 @@
 
 <p align="center">
   <b>Overview:</b> <a href="#what-is-this">What is this?</a> · <a href="#features">Features</a><br>
-  <b>Run:</b> <a href="#quick-start">Quick Start</a> · <a href="#configuration">Configuration</a> · <a href="#kubernetes-and-vault">Kubernetes &amp; Vault</a> · <a href="#docker">Docker</a> · <a href="#public-url-and-reverse-proxy-deployments">Public URL</a> · <a href="#tls--https">TLS</a><br>
+  <b>Run:</b> <a href="#quick-start">Quick Start</a> · <a href="#configuration">Configuration</a> · <a href="#kubernetes-helm-and-vault">Kubernetes &amp; Vault</a> · <a href="#docker">Docker</a> · <a href="#public-url-and-reverse-proxy-deployments">Public URL</a> · <a href="#tls--https">TLS</a><br>
   <b>Use:</b> <a href="#connecting-ai-clients">AI Clients</a> · <a href="#available-tools">Tools</a> · <a href="#common-parameters-get-methods">Parameters</a> · <a href="#time-zones">Time zones</a> · <a href="#pdf-reports-beta">PDF Reports</a> · <a href="#token-budget">Token Budget</a><br>
   <b>More:</b> <a href="#zabbix-compatibility">Compatibility</a> · <a href="#development">Development</a> · <a href="#license">License</a>
 </p>
@@ -45,14 +45,14 @@ The server runs as a standalone HTTP service. AI clients connect to it over the 
 
 ## Features
 
-- **Complete API coverage** - All 58 Zabbix API groups (223 tools): hosts, problems, triggers, templates, users, dashboards, and more
+- **Complete API coverage** - 52 Zabbix API groups (191 tools): hosts, problems, triggers, templates, dashboards, and more. **Zabbix users are deliberately not exposed** - there are no tools for users, user groups, user directories, roles, API tokens or MFA, and `zabbix_raw_api_call` refuses those API objects
 - **Extension tools** (14) - **Pre-correlated views**: `host_status_get`, `hostgroup_overview_get`, `infrastructure_summary_get`, `item_history_summary_get`, `problem_active_get` (fold 3-5 raw API calls into one round-trip). Plus `graph_render` (PNG export), `anomaly_detect` (z-score analysis), `capacity_forecast` (linear regression), `item_threshold_search` (filter items by `lastvalue` thresholds), `report_generate` (PDF reports), `action_prepare`/`action_confirm` (two-step write approval), `health_check` (server diagnostics) and `zabbix_raw_api_call` (admin escape hatch for un-wrapped methods).
 - **Twelve-factor configuration** - everything comes from `ZABBIX_MCP_*` environment variables, validated by [pydantic-settings](https://docs.pydantic.dev/latest/concepts/pydantic_settings/); credentials are `SecretStr` and never reach the logs
 - **Vault-ready** - secrets arrive as environment variables or as files rendered by Vault Agent / the Vault Secrets Operator / External Secrets; the server itself never talks to Vault
 - **Bearer-token authentication** - one token for MCP clients, optionally with an expiry so a forgotten token stops working by itself
 - **Multi-server support** - Connect to multiple Zabbix instances (production, staging, ...) with separate credentials
 - **HTTP + SSE transports** - Streamable HTTP (recommended) and SSE for clients like n8n that lack session management
-- **Tool filtering** - Limit exposed tools by category (`monitoring`, `alerts`, `users`, `extensions`, etc.) or individual API prefix to reduce the tool catalog size and stay under LLM context limits (see [Token Budget](#token-budget) below)
+- **Tool filtering** - Limit exposed tools by category (`monitoring`, `alerts`, `extensions`, etc.) or individual API prefix to reduce the tool catalog size and stay under LLM context limits (see [Token Budget](#token-budget) below)
 - **Compact output mode** - Get methods return only key fields by default, reducing response token usage; LLM can request `extend` for full details
 - **LLM-friendly normalizations** - Symbolic enum names, auto-fill defaults, preprocessing cleanup, timestamp conversion with local-time rendering (`<field>_local` siblings and a per-call zone note, see [Time zones](#time-zones))
 - **Read-only mode** - Per-server write protection to prevent accidental changes (on by default)
@@ -184,33 +184,30 @@ To rotate, change the value in Vault and restart the pods (or roll the Deploymen
 
 There are no per-token scopes or policies any more: the token grants access to all tools that are enabled by `TOOLS`/`DISABLED_TOOLS`, and writes are governed per Zabbix server by `READ_ONLY`. Need different audiences? Run one instance per audience with its own token, tool list and Zabbix credentials.
 
-### Kubernetes and Vault
+### Kubernetes, Helm and Vault
 
-The server reads only its environment (and, optionally, files), so it works with whichever Vault integration your cluster already runs. Ready-to-adapt manifests are in [`deploy/k8s/`](deploy/k8s/).
+The server reads only its environment (and, optionally, files), so it never talks to Vault itself. The repository carries the same build-and-deploy setup as the other MCP services:
 
-**Option 1 - environment from a Kubernetes Secret** (Vault Secrets Operator or External Secrets Operator syncs Vault → Secret):
+| File | Purpose |
+|---|---|
+| [`.gitlab-ci.yml`](.gitlab-ci.yml) | Pipeline built from the shared components: build, `pytest` inside the built image, deploy to the test and prod stands (manual on `devops*`/`test` and `main`/`master`), Vault secrets from `$CI_PROJECT_ROOT_NAMESPACE/$CI_PROJECT_NAME` |
+| [`ci-cd-files/Dockerfile`](ci-cd-files/Dockerfile) | Pipeline image: installs the package from the Nexus PyPI proxy, runs the HTTP transport on `0.0.0.0:30030` as `nobody`. Without the `reporting` extra, so `report_generate` is not available in this image |
+| [`helm/values-prod.yaml`](helm/values-prod.yaml) | Values for the shared chart: Deployment, Service, Ingress on `/mcp` |
 
-```yaml
-envFrom:
-  - secretRef: { name: zabbix-mcp-secrets }       # ZABBIX_MCP_ZABBIX_SERVERS__PROD__API_TOKEN, ZABBIX_MCP_SERVER__AUTH_TOKEN, ...
-  - configMapRef: { name: zabbix-mcp-config }     # the non-secret settings
-```
+**Secrets** are put in Vault under the project path and injected into the container as environment variables - nothing secret is in git or in the image:
 
-**Option 2 - files rendered by Vault Agent Injector / CSI provider.** Every file in the secrets directory is read as the variable of the same name in lower case, so a file `zabbix_mcp_zabbix_servers__prod__api_token` containing the token behaves like `ZABBIX_MCP_ZABBIX_SERVERS__PROD__API_TOKEN`. The directory is `ZABBIX_MCP_SECRETS_DIR`, or `/vault/secrets` when that exists. Trailing newlines are stripped, dot-files (the `..data` bookkeeping of mounted Secrets) are ignored, and real environment variables win over files.
+| Vault key | Meaning |
+|---|---|
+| `ZABBIX_MCP_ZABBIX_SERVERS__PROD__URL` | Zabbix frontend URL |
+| `ZABBIX_MCP_ZABBIX_SERVERS__PROD__API_TOKEN` | Zabbix API token of a least-privilege user |
+| `ZABBIX_MCP_SERVER__AUTH_TOKEN` | Bearer token MCP clients send |
+| `ZABBIX_MCP_SERVER__AUTH_TOKEN_EXPIRES_AT` | Optional expiry of that token (ISO 8601) |
 
-```yaml
-metadata:
-  annotations:
-    vault.hashicorp.com/agent-inject: "true"
-    vault.hashicorp.com/role: "zabbix-mcp"
-    vault.hashicorp.com/agent-inject-secret-zabbix_mcp_zabbix_servers__prod__api_token: "kv/data/zabbix-mcp/prod"
-    vault.hashicorp.com/agent-inject-template-zabbix_mcp_zabbix_servers__prod__api_token: |
-      {{- with secret "kv/data/zabbix-mcp/prod" -}}{{ .Data.data.api_token }}{{- end -}}
-```
+Non-secret settings go into `env:` of `helm/values-prod.yaml` (it already sets `ZABBIX_MCP_SERVER__PUBLIC_URL`, which must match the Ingress host). Settings are read once at start-up, so rotating a secret means redeploying or restarting the pods.
 
-Settings are read once at start-up. Rotating a secret therefore means restarting the pods - the pod template annotation `checksum/secret` or the operators' rollout-restart feature does that for you.
+If your cluster mounts Vault secrets as files instead (Vault Agent Injector, CSI), point `ZABBIX_MCP_SECRETS_DIR` at the mount (default `/vault/secrets`): every file is read as the variable of the same name in lower case, e.g. `zabbix_mcp_zabbix_servers__prod__api_token`; trailing newlines are stripped, dot-files (the `..data` bookkeeping of mounted Secrets) are ignored, and real environment variables win over files.
 
-Health: `GET /health` answers `{"status":"ok"}` without authentication - use it for the liveness and readiness probes.
+Health: `GET /health` answers `{"status":"ok"}` without authentication.
 
 ### Docker
 
@@ -595,8 +592,6 @@ All tools accept an optional `server` parameter to target a specific Zabbix inst
 <tr><td rowspan="3"><strong>Alerts</strong></td><td><code>action_*</code> / <code>mediatype_*</code></td><td>Configure automated alert actions and notification channels (email, Slack, webhook, ...)</td></tr>
 <tr><td><code>alert_get</code></td><td>Query the history of sent notifications and remote commands</td></tr>
 <tr><td><code>script_execute</code></td><td>Execute global scripts on hosts (SSH, IPMI, custom commands)</td></tr>
-<tr><td rowspan="2"><strong>Users &amp; Access</strong></td><td><code>user_*</code> / <code>usergroup_*</code> / <code>role_*</code></td><td>Manage user accounts, permission groups, and RBAC roles</td></tr>
-<tr><td><code>token_*</code></td><td>Create, list, and manage API tokens for service accounts</td></tr>
 <tr><td rowspan="3"><strong>Administration</strong></td><td><code>proxy_*</code> / <code>proxygroup_*</code></td><td>Manage Zabbix proxies and proxy groups for distributed monitoring</td></tr>
 <tr><td><code>auditlog_get</code></td><td>Query the audit trail of all configuration changes and logins</td></tr>
 <tr><td><code>settings_get</code> / <code>_update</code></td><td>View and modify global Zabbix server settings</td></tr>
@@ -657,7 +652,7 @@ The set of report templates is fixed to the built-in ones above. See [`docs/REPO
 
 ## Token Budget
 
-By default the server exposes all 237 tools (223 Zabbix API + 14 extension). Each tool's JSON schema (name, description, 20-40 optional parameters) adds roughly 400-500 tokens to the MCP tool catalog that is sent to the LLM at the start of every session. **With the default "all tools" configuration, the catalog alone costs ~100k tokens before your first prompt even reaches the model.** This is the single largest driver of token usage - far more than compact vs. extended response mode.
+By default the server exposes all 205 tools (191 Zabbix API + 14 extension). Each tool's JSON schema (name, description, 20-40 optional parameters) adds roughly 400-500 tokens to the MCP tool catalog that is sent to the LLM at the start of every session. **With the default "all tools" configuration, the catalog alone costs ~90k tokens before your first prompt even reaches the model.** This is the single largest driver of token usage - far more than compact vs. extended response mode.
 
 **Fix:** add a tools allowlist to expose only what you need:
 
@@ -676,8 +671,8 @@ Or use group names as shortcuts (pulls in more tools per group):
 | `monitoring` | 87 | host, hostgroup, item, trigger, problem, event, history, trend, graph, sla, discovery, httptest, hostinterface, hostprototype, ... + the 5 pre-correlated views |
 | `data_collection` | 27 | template, templategroup, templatedashboard, valuemap, dashboard |
 | `alerts` | 16 | action, alert, mediatype, script |
-| `users` | 39 | user, usergroup, userdirectory, usermacro, token, role, mfa |
-| `administration` | 59 | settings, housekeeping, authentication, maintenance, map, proxy, proxygroup, autoreg, regexp, ... |
+| `users` | 7 | usermacro (user, usergroup, userdirectory, role, token and mfa are not exposed at all) |
+| `administration` | 55 | settings, housekeeping, authentication, maintenance, map, proxy, proxygroup, autoreg, regexp, ... |
 | `extensions` | 14 | graph_render, anomaly_detect, capacity_forecast, item_threshold_search, report_generate, action_prepare, action_confirm, problem_active_get, host_status_get, hostgroup_overview_get, infrastructure_summary_get, item_history_summary_get, zabbix_raw_api_call, health_check |
 
 `ZABBIX_MCP_SERVER__DISABLED_TOOLS` is the denylist counterpart. To serve different audiences different catalogs, run one instance per audience.
@@ -735,7 +730,7 @@ ZABBIX_MCP_ZABBIX_SERVERS__ASIA__TIMEZONE=Asia/Tokyo
 <tr><th width="220">Zabbix Version</th><th width="120">Status</th><th>Notes</th></tr>
 <tr><td>8.0</td><td>Experimental</td><td>Not released yet. Works with <code>skip_version_check = true</code>; the five methods 8.0 removes (<code>host.massupdate</code>, <code>hostgroup.massupdate</code>, <code>template.massupdate</code>, <code>templategroup.massupdate</code>, <code>hostinterface.replacehostinterfaces</code>) are refused with the documented replacement; the new 8.0 objects (<code>apm*</code>, <code>device</code>, <code>serverinfo</code>) are reachable through <code>zabbix_raw_api_call</code> until dedicated tools follow the release</td></tr>
 <tr><td>7.0 LTS, 7.2, 7.4</td><td>Fully supported</td><td>All API methods match this version — complete feature coverage</td></tr>
-<tr><td>6.0 LTS, 6.2, 6.4</td><td>Supported</td><td>Everything the release has. Methods that arrived later (e.g. <code>proxygroup.*</code>, <code>mfa.*</code>, <code>connector.*</code> in 7.0; <code>templategroup.*</code>, <code>userdirectory.*</code> in 6.2) are marked in <code>tools/list</code> and refused with the release they need (see below)</td></tr>
+<tr><td>6.0 LTS, 6.2, 6.4</td><td>Supported</td><td>Everything the release has. Methods that arrived later (e.g. <code>proxygroup.*</code>, <code>connector.*</code> in 7.0; <code>templategroup.*</code> in 6.2) are marked in <code>tools/list</code> and refused with the release they need (see below)</td></tr>
 <tr><td>5.4</td><td>Basic, untested</td><td>Has API tokens, so the normal configuration applies. Core monitoring and data collection should work; not in our test matrix</td></tr>
 <tr><td>5.0 LTS, 5.2</td><td>Legacy, best effort</td><td><strong>Out of upstream support, no API tokens.</strong> Reachable only through <code>legacy_auth = true</code> with a username and password - a security risk by design, see <a href="#legacy-auth-zabbix-50-and-52-only">Legacy auth</a>. Not in our test matrix; verified by a community contributor on 5.0.47</td></tr>
 </table>

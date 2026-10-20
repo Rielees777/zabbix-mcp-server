@@ -327,13 +327,11 @@ class TestThroughRegisteredTools(unittest.TestCase):
 
     def test_default_compact_output_follows_the_release(self):
         """A tool's default output must never ask an old server for a property it
-        does not have (proxy.get name is 7.0+, userdirectory.get idp_type is 6.4+)."""
+        does not have (proxy.get name is 7.0+)."""
         sent, _ = self._call("proxy_get", {"limit": 1}, version="6.4.21")
         self.assertEqual(sent[0][1]["output"], "extend")  # only proxyid would be left: no overview
         sent, _ = self._call("proxy_get", {"limit": 1}, version="7.4.14")
         self.assertIn("name", sent[0][1]["output"])
-        sent, _ = self._call("userdirectory_get", {"limit": 1}, version="6.2.9")
-        self.assertNotIn("idp_type", sent[0][1]["output"])
         sent, _ = self._call("proxy_get", {"limit": 1}, version=None)
         self.assertIn("name", sent[0][1]["output"])  # unknown version: unchanged
         for m in GET_METHODS:

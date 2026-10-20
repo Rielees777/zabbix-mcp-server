@@ -265,10 +265,6 @@ class TestThroughRegisteredTools(unittest.TestCase):
         self.assertEqual((sent["active_since"], sent["active_till"]), (T0, T0 + 86400))
         self.assertEqual(sent["timeperiods"][0]["start_date"], T0)
 
-        sent = self._call("token_create", {"params": {"name": "t", "userid": "1",
-                                                      "expires_at": "2026-04-01 08:00:00+02:00"}})
-        self.assertEqual(sent["expires_at"], T0 - 7200)
-
         sent = self._call("sla_create", {"params": {
             "name": "s", "slo": 99.9, "period": 1, "timezone": "UTC", "effective_date": "2026-04-01",
             "service_tags": [{"tag": "a"}],

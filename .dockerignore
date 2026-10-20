@@ -6,7 +6,6 @@ dist
 build
 *.egg-info
 .readme
-tests
 .mcp.json
 .mcp.json.example
 .env

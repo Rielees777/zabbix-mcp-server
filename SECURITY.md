@@ -19,7 +19,7 @@ We will acknowledge your report within 48 hours and work with you on a fix.
 
 - All configuration comes from `ZABBIX_MCP_*` environment variables (or files in a secrets directory); there is no config file holding credentials on disk
 - Credentials - Zabbix API tokens and passwords, the MCP bearer token, the SMTP password - are held as pydantic `SecretStr` values: they are masked in `repr`, log lines and validation errors
-- In Kubernetes inject them from HashiCorp Vault (Vault Agent Injector, Vault Secrets Operator or External Secrets); see [`deploy/k8s/`](deploy/k8s/). The server never contacts Vault itself, so it needs no Vault credentials of its own
+- In Kubernetes the pipeline injects them from HashiCorp Vault as environment variables (see [`.gitlab-ci.yml`](.gitlab-ci.yml) and [`helm/values-prod.yaml`](helm/values-prod.yaml)). The server never contacts Vault itself, so it needs no Vault credentials of its own
 - Settings are read once at start-up; rotate a secret by restarting the pods
 - Keep `.env` out of version control (`.gitignore` and `.dockerignore` already exclude it) and out of images
 
@@ -31,6 +31,10 @@ We will acknowledge your report within 48 hours and work with you on a fix.
 - `action_confirm` only accepts a confirmation token prepared by the same bearer token
 - `raw_json=true` (drops the prompt-injection marker from responses) is refused unless the operator sets `ZABBIX_MCP_SERVER__ALLOW_RAW_JSON=true`
 - Without a token the server is unauthenticated; the start-up log warns when it is bound to anything but localhost
+
+### Zabbix Users Are Not Exposed
+
+No tool reads or changes Zabbix users, user groups, user directories, roles, API tokens or MFA methods, and `zabbix_raw_api_call` refuses every method of those objects (`user.*`, `usergroup.*`, `userdirectory.*`, `role.*`, `token.*`, `mfa.*`, matched case-insensitively), so they cannot be reached by the MCP client even with a Zabbix API token that is allowed to. Global authentication settings (`authentication.get/update`) and user macros remain available. Other `*.get` tools can still show user ids that Zabbix returns as part of their own objects (for example `userid` in an action's operations).
 
 ### Zabbix Credentials
 

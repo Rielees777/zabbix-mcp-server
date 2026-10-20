@@ -1,0 +1,49 @@
+type: Deployment
+strategy:
+  type: Recreate
+containers:
+  zabbix-mcp-server:
+    name: zabbix-mcp-server
+    repository: ""
+    tag: ""
+    runAsUser: 65534
+    ports:
+      - name: http
+        containerPort: 30030
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "250m"
+readOnlyRootFilesystem: "false"
+# env не содержит секретов. Из Vault (путь $CI_PROJECT_ROOT_NAMESPACE/$CI_PROJECT_NAME)
+# в env контейнера инжектируются:
+#   ZABBIX_MCP_ZABBIX_SERVERS__PROD__URL        - адрес Zabbix, например https://zabbix.example.com
+#   ZABBIX_MCP_ZABBIX_SERVERS__PROD__API_TOKEN  - API-токен Zabbix (пользователь с минимальными правами)
+#   ZABBIX_MCP_SERVER__AUTH_TOKEN               - bearer-токен для MCP-клиентов
+#   ZABBIX_MCP_SERVER__AUTH_TOKEN_EXPIRES_AT    - (необязательно) срок действия токена, ISO 8601
+# Порт и режим сервера (transport=http, host=0.0.0.0, port=30030) заданы в ci-cd-files/Dockerfile.
+# Режим записи в Zabbix выключен по умолчанию (READ_ONLY=true); включать только в Vault осознанно.
+env:
+  # Внешний адрес, который сервер сообщает клиентам. Должен совпадать с host в ingress ниже.
+  ZABBIX_MCP_SERVER__PUBLIC_URL: "https://zbx-mcp.sovcombank.group"
+
+service:
+  zabbix-mcp-server:
+    ports:
+    - servicePortName: http
+      servicePort: 30030
+
+ingress:
+  zabbix-mcp-server:
+    class: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    host:
+      - name: "zbx-mcp.sovcombank.group"
+        path:
+          - uri: "/mcp"
+            pathType: Prefix
+            serviceName: zabbix-mcp-server
+            servicePort: 30030
