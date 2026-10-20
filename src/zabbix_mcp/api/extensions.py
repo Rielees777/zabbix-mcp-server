@@ -166,7 +166,7 @@ def graph_render(
         #      modern installs.
         req = urllib.request.Request(chart_url)
 
-        api_token = srv_config.api_token
+        api_token = srv_config.api_token.get_secret_value()
         if api_token:
             req.add_header("Authorization", f"Bearer {api_token}")
 
@@ -187,7 +187,7 @@ def graph_render(
         # state on it directly).
         signed_cookie = _GRAPH_SESSION_CACHE.get(server_name)
         fe_user = getattr(srv_config, "frontend_username", "") or ""
-        fe_pass = getattr(srv_config, "frontend_password", "") or ""
+        fe_pass = srv_config.frontend_password.get_secret_value()
         # Refuse to send the frontend password over plain HTTP. The
         # Zabbix login form posts ``name``/``password`` as form-data;
         # without TLS it is recoverable from any LAN sniffer.

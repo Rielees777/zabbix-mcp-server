@@ -22,7 +22,7 @@ import asyncio
 import unittest
 
 from zabbix_mcp.server import _make_request_context_middleware
-from zabbix_mcp.token_store import current_client_ip, current_request_base
+from zabbix_mcp.auth import current_client_ip, current_request_base
 
 
 def _scope(peer="127.0.0.1", **headers):

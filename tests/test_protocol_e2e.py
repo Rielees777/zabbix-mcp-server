@@ -26,6 +26,7 @@ plumbing do not touch the Zabbix API.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -102,26 +103,20 @@ class TestDualGenerationProtocol(unittest.TestCase):
     def setUpClass(cls):
         cls.port = _free_port()
         cls.url = f"http://127.0.0.1:{cls.port}/mcp"
-        cfg = f"""
-[server]
-transport = "http"
-host = "127.0.0.1"
-port = {cls.port}
-auth_token = "{BEARER}"
-
-[zabbix.dev]
-url = "https://zabbix-e2e.example.invalid"
-api_token = "dummy"
-"""
-        cls._cfg = tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False)
-        cls._cfg.write(cfg)
-        cls._cfg.close()
+        env = {
+            **os.environ,
+            "ZABBIX_MCP_SERVER__TRANSPORT": "http",
+            "ZABBIX_MCP_SERVER__HOST": "127.0.0.1",
+            "ZABBIX_MCP_SERVER__PORT": str(cls.port),
+            "ZABBIX_MCP_SERVER__AUTH_TOKEN": BEARER,
+            "ZABBIX_MCP_ZABBIX_SERVERS__DEV__URL": "https://zabbix-e2e.example.invalid",
+            "ZABBIX_MCP_ZABBIX_SERVERS__DEV__API_TOKEN": "dummy",
+        }
         cls._log = open(Path(tempfile.gettempdir()) / "zmcp-protocol-e2e.log", "w")
         cls._proc = subprocess.Popen(
             [sys.executable, "-c",
-             "from zabbix_mcp.cli import main; main()",
-             "--config", cls._cfg.name],
-            cwd=tempfile.gettempdir(),
+             "from zabbix_mcp.cli import main; main()"],
+            cwd=tempfile.gettempdir(), env=env,
             stdout=cls._log, stderr=subprocess.STDOUT,
         )
         try:
@@ -135,7 +130,6 @@ api_token = "dummy"
         cls._proc.terminate()
         cls._proc.wait(timeout=10)
         cls._log.close()
-        Path(cls._cfg.name).unlink(missing_ok=True)
 
     # -- legacy generation ---------------------------------------------------
 
@@ -208,10 +202,9 @@ api_token = "dummy"
         self.assertEqual(status, 200)
         result = resp["result"]
         self.assertGreater(len(result["tools"]), 200)
-        # Spec: CacheableResult on tools/list; per-token filtering makes
-        # the catalog private to the authorization.
+        # Spec: CacheableResult on tools/list, private to the authorization.
         self.assertEqual(result.get("cacheScope"), "private")
-        # [server].tools_list_cache_ttl default is 300 s -> 300000 ms.
+        # tools_list_cache_ttl default is 300 s -> 300000 ms.
         self.assertEqual(result.get("ttlMs"), 300000)
         self.assertEqual(result.get("resultType"), "complete")
         self.assertIn("io.modelcontextprotocol/serverInfo", result.get("_meta", {}))

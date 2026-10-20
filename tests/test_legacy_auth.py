@@ -8,7 +8,7 @@
 """Legacy password login for Zabbix 5.0 / 5.2 (#77, PR #78 by @rspadim).
 
 Those releases have no API tokens. Password login is therefore allowed,
-but only behind an explicit `legacy_auth = true`, never as a fallback,
+but only behind an explicit `legacy_auth=true`, never as a fallback,
 never next to a token, and never against a Zabbix that has tokens
 (5.4+). The tests pin each of those edges because each one is a way the
 "workaround" could quietly become the normal path.
@@ -17,7 +17,6 @@ never next to a token, and never against a Zabbix that has tokens
 from __future__ import annotations
 
 import os
-import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -25,69 +24,57 @@ from zabbix_mcp.client import ClientManager
 from zabbix_mcp.config import AppConfig, ConfigError, ZabbixServerConfig, load_config
 
 
-def _load(body: str) -> AppConfig:
-    with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
-        f.write(body); path = f.name
-    try:
-        return load_config(path)
-    finally:
-        os.unlink(path)
-
-
-SRV = '[zabbix.old]\nurl = "http://zabbix5.example.com"\n'
+def _load(**fields: str) -> AppConfig:
+    """Load one Zabbix server named ``old`` from environment variables."""
+    env = {"ZABBIX_MCP_ZABBIX_SERVERS__OLD__URL": "http://zabbix5.example.com"}
+    env.update({f"ZABBIX_MCP_ZABBIX_SERVERS__OLD__{k.upper()}": v for k, v in fields.items()})
+    with patch.dict(os.environ, env, clear=True):
+        return load_config()
 
 
 class TestConfigRules(unittest.TestCase):
 
     def test_legacy_entry_is_valid(self):
-        cfg = _load(SRV + 'legacy_auth = true\nusername = "mcp"\npassword = "secret"\n')
+        cfg = _load(legacy_auth="true", username="mcp", password="secret")
         srv = cfg.zabbix_servers["old"]
         self.assertTrue(srv.legacy_auth)
-        self.assertEqual((srv.username, srv.password), ("mcp", "secret"))
-        self.assertEqual(srv.api_token, "", "a legacy entry carries no token")
+        self.assertEqual((srv.username, srv.password.get_secret_value()), ("mcp", "secret"))
+        self.assertEqual(srv.api_token.get_secret_value(), "", "a legacy entry carries no token")
 
     def test_password_without_the_flag_is_refused(self):
         # The point of the flag: password login is never a silent fallback.
         with self.assertRaises(ConfigError) as ctx:
-            _load(SRV + 'username = "mcp"\npassword = "secret"\n')
+            _load(username="mcp", password="secret")
         self.assertIn("legacy_auth", str(ctx.exception))
 
     def test_flag_together_with_a_token_is_refused(self):
         with self.assertRaises(ConfigError) as ctx:
-            _load(SRV + 'legacy_auth = true\napi_token = "tok"\nusername = "mcp"\npassword = "secret"\n')
+            _load(legacy_auth="true", api_token="tok", username="mcp", password="secret")
         self.assertIn("pick one", str(ctx.exception))
 
     def test_flag_without_credentials_is_refused(self):
-        for partial in ('username = "mcp"\n', 'password = "secret"\n', ''):
+        for partial in ({"username": "mcp"}, {"password": "secret"}, {}):
             with self.subTest(partial=partial):
                 with self.assertRaises(ConfigError):
-                    _load(SRV + 'legacy_auth = true\n' + partial)
+                    _load(legacy_auth="true", **partial)
 
     def test_non_boolean_flag_is_refused(self):
-        with self.assertRaises(ConfigError) as ctx:
-            _load(SRV + 'legacy_auth = "true"\nusername = "mcp"\npassword = "secret"\n')
-        self.assertIn("non-boolean", str(ctx.exception))
+        with self.assertRaises(ConfigError):
+            _load(legacy_auth="maybe", username="mcp", password="secret")
 
-    def test_env_vars_are_expanded(self):
-        with patch.dict(os.environ, {"T_USER": "mcp", "T_PASS": "s3cret"}):
-            cfg = _load(SRV + 'legacy_auth = true\nusername = "${T_USER}"\npassword = "${T_PASS}"\n')
-        srv = cfg.zabbix_servers["old"]
-        self.assertEqual((srv.username, srv.password), ("mcp", "s3cret"))
-
-    def test_empty_after_expansion_is_refused(self):
-        with patch.dict(os.environ, {"T_EMPTY": ""}):
-            with self.assertRaises(ConfigError):
-                _load(SRV + 'legacy_auth = true\nusername = "mcp"\npassword = "${T_EMPTY}"\n')
+    def test_blank_password_is_refused(self):
+        with self.assertRaises(ConfigError):
+            _load(legacy_auth="true", username="mcp", password="   ")
 
     def test_token_path_is_unchanged(self):
-        cfg = _load(SRV + 'api_token = "tok"\n')
+        cfg = _load(api_token="tok")
         srv = cfg.zabbix_servers["old"]
         self.assertFalse(srv.legacy_auth)
-        self.assertEqual(srv.api_token, "tok")
+        self.assertEqual(srv.api_token.get_secret_value(), "tok")
 
     def test_missing_token_is_still_refused(self):
         with self.assertRaises(ConfigError) as ctx:
-            _load(SRV)
+            _load()
         self.assertIn("api_token", str(ctx.exception))
 
 

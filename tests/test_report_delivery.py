@@ -52,7 +52,7 @@ class TestSaveReport(unittest.TestCase):
     def test_refuses_when_not_configured(self):
         with self.assertRaises(delivery.DeliveryError) as ctx:
             delivery.save_report(PDF, "", "report.pdf")
-        self.assertIn("output_dir", str(ctx.exception))
+        self.assertIn("OUTPUT_DIR", str(ctx.exception))
 
     def test_refuses_missing_directory(self):
         with self.assertRaises(delivery.DeliveryError):

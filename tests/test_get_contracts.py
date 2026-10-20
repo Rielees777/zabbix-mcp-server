@@ -392,18 +392,17 @@ class TestValidationSwitch(unittest.TestCase):
         self.assertIn("hostid, host, name, status", tool.parameters["properties"]["sortfield"]["description"])
 
     def test_config_rejects_non_boolean(self):
-        import tempfile, textwrap
+        import os
+        from unittest.mock import patch
         from zabbix_mcp.config import ConfigError, load_config
-        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
-            f.write(textwrap.dedent("""
-                [server]
-                validate_get_params = "no"
-                [zabbix.t]
-                url = "http://localhost"
-                api_token = "x"
-            """))
-        with self.assertRaises(ConfigError):
-            load_config(f.name)
+        env = {
+            "ZABBIX_MCP_SERVER__VALIDATE_GET_PARAMS": "no-thanks",
+            "ZABBIX_MCP_ZABBIX_SERVERS__T__URL": "http://localhost",
+            "ZABBIX_MCP_ZABBIX_SERVERS__T__API_TOKEN": "x",
+        }
+        with patch.dict(os.environ, env, clear=True), self.assertRaises(ConfigError):
+            load_config()
+
 
 
 class TestApiErrorText(unittest.TestCase):

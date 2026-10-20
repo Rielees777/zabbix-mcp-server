@@ -19,8 +19,6 @@
 
 import asyncio
 import base64
-import hashlib
-import hmac
 import inspect
 import json
 import logging
@@ -35,18 +33,12 @@ from typing import Annotated, Any, Optional
 from pydantic import Field
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.server.mcpserver.utilities import func_metadata as _fm_module
-from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import (
     CallToolResult,
-    CreateTaskResult,
     Icon,
-    ListToolsRequest,
-    ListToolsResult,
     ResourceLink,
-    ServerResult,
     TextContent,
     ToolAnnotations,
     ToolExecution,
@@ -58,10 +50,11 @@ from zabbix_mcp.api.contracts import (
     compact_output_for, contract_for, describe_extra_params, describe_filter,
     describe_output, describe_search, specialise_params, validate_get_params,
 )
-from zabbix_mcp.api.types import MethodDef, ParamDef
+from zabbix_mcp.api.types import MethodDef
 from zabbix_mcp.api.versions import unavailable_reason
 from zabbix_utils.exceptions import APIRequestError
 from zabbix_mcp.client import ClientManager, RateLimitError, ReadOnlyError
+from zabbix_mcp.auth import BearerTokenVerifier, caller_fingerprint
 from zabbix_mcp.config import AppConfig
 from zabbix_mcp.timezones import EPOCH_FIELDS, add_local_times, now_local, resolve_zone, zone_name
 
@@ -366,7 +359,7 @@ def _try_parse_timestamp(value: str, tz: tzinfo | None = None) -> int | None:
 
     ``datetime.fromisoformat`` goes first, after a trailing ``Z`` is
     rewritten to ``+00:00`` (Python 3.10 does not accept the suffix,
-    same as ``parse_expiry`` in ``token_store``), so fractional seconds
+    same as ``parse_expiry`` in ``auth``), so fractional seconds
     of any width, a space separator and a UTC offset all parse.  The
     explicit ``strptime`` formats remain as a fallback for the few
     shapes 3.10's ``fromisoformat`` rejects.  A value without a zone
@@ -711,7 +704,7 @@ def _resolve_source_file(
     if not allowed_import_dirs:
         raise ValueError(
             "source_file feature is disabled. Configure 'allowed_import_dirs' "
-            "in [server] config to specify directories from which files may be read."
+            "in ZABBIX_MCP_SERVER__ALLOWED_IMPORT_DIRS to specify directories from which files may be read."
         )
 
     raw_path = Path(params["source_file"])
@@ -937,15 +930,8 @@ def _api_error_text(api_method: str, exc: BaseException) -> str:
 
 
 def _servers_for_caller(client_manager) -> list[str]:
-    """The configured servers the calling token may use (all of them without a token or with a wildcard)."""
-    from zabbix_mcp.token_store import current_token_info
-    token = current_token_info.get()
-    names = list(client_manager.server_names)
-    if token is not None:
-        allowed = list(getattr(token, "allowed_servers", None) or [])
-        if allowed and "*" not in allowed:
-            names = [n for n in names if n in allowed]
-    return names
+    """The configured Zabbix servers a call may use."""
+    return list(client_manager.server_names)
 
 
 def _annotate_tools_by_version(tools: list, client_manager) -> list:
@@ -1236,9 +1222,8 @@ _UNTRUSTED_PREAMBLE = _UNTRUSTED_PREAMBLE_TEXT + "]\n"
 # zabbix_raw_api_call wrapper, so they stay in sync.
 _RAW_JSON_PARAM_DESC = (
     "Strips the security disclaimer preamble from the response so it is pure JSON. "
-    "Default: false. Requires the bearer token to have 'allow_raw_json' explicitly enabled "
-    "by an operator in the admin portal - tokens without that policy receive a PolicyError "
-    "instead. WARNING: setting true bypasses the prompt-injection mitigation marker that "
+    "Default: false. Requires the operator to set ZABBIX_MCP_SERVER__ALLOW_RAW_JSON=true; "
+    "otherwise the call is refused. WARNING: setting true bypasses the prompt-injection mitigation marker that "
     "wraps untrusted Zabbix data (host names, item descriptions, problem text). LLM clients "
     "(Claude, GPT, Cursor, ...) should leave this false; only programmatic non-LLM consumers "
     "(Python scripts, n8n workflows that json.loads the result) should set true."
@@ -1251,99 +1236,6 @@ _RAW_JSON_PARAM_DESC = (
 # Cloudflare / reverse-proxy timeouts. graph_render and capacity_forecast
 # are usually under 5 s and the polling overhead is not worth it.
 _TASK_AUGMENTED_TOOLS = frozenset({"report_generate"})
-
-
-# ---------------------------------------------------------------------------
-# Tools/list filtering by calling token scopes
-# ---------------------------------------------------------------------------
-
-# Extension tools that perform write operations on Zabbix and must be hidden
-# from a read-only token's tools/list. The auto-generated tools are flagged
-# via MethodDef.read_only; this set covers the hand-rolled extension tools.
-_WRITE_EXTENSION_TOOLS: frozenset[str] = frozenset({
-    "action_prepare", "action_confirm",
-    "zabbix_raw_api_call",  # caller can invoke any Zabbix method, including writes
-})
-
-
-def _build_write_tools_set() -> frozenset[str]:
-    """Names of every registered tool that mutates state on the Zabbix server.
-
-    Built once at server boot from the MethodDef registry plus the
-    hand-rolled extension write tools above. Used by _filter_tools_by_token
-    to drop write tools from a read-only token's tools/list view.
-    """
-    from zabbix_mcp.api import ALL_METHODS
-    auto = {m.tool_name for m in ALL_METHODS if not m.read_only}
-    return frozenset(auto | _WRITE_EXTENSION_TOOLS)
-
-
-def _filter_tools_by_token(tools: list) -> list:
-    """Trim a tools/list response to what the current token may actually call.
-
-    Reads the calling token from ``current_token_info`` (set by the auth
-    middleware) and applies two filters:
-
-    1. **Scope filter.** Tokens with ``scopes = ["*"]`` (or unset) keep
-       the full catalog. Otherwise the scope list is expanded via
-       ``_expand_tool_groups`` (groups -> prefixes), and only tools
-       whose ``tool_name.rsplit("_", 1)[0]`` matches an allowed prefix
-       survive. Extension tools (which carry no underscore-separable
-       prefix) are matched by exact tool name plus an "extensions"
-       group shortcut.
-
-    2. **Read-only filter.** Tokens with ``read_only = true`` never
-       see write tools (``*_create / *_update / *_delete``, the mass*
-       methods, ``action_prepare/confirm``, ``zabbix_raw_api_call``,
-       etc.). The set is precomputed in ``_WRITE_TOOLS``.
-
-    When no token is in context (stdio transport, or pre-auth handshake
-    where the contextvar is still None), returns the input unchanged
-    so existing single-token / no-auth setups behave as before.
-    """
-    from zabbix_mcp.token_store import current_token_info
-    token = current_token_info.get()
-    if token is None:
-        return tools
-
-    read_only = bool(getattr(token, "read_only", False))
-    scopes = list(getattr(token, "scopes", None) or [])
-    has_wildcard = (not scopes) or "*" in scopes
-
-    if has_wildcard:
-        if read_only:
-            return [t for t in tools if t.name not in _WRITE_TOOLS]
-        return tools
-
-    from zabbix_mcp.config import _expand_tool_groups, TOOL_GROUPS
-    allowed_prefixes = set(_expand_tool_groups(scopes))
-    extension_names = set(TOOL_GROUPS.get("extensions", []))
-    has_extensions_scope = "extensions" in scopes
-
-    out = []
-    for t in tools:
-        if read_only and t.name in _WRITE_TOOLS:
-            continue
-        # Extension tools: identified by the exact-name list in TOOL_GROUPS
-        if t.name in extension_names:
-            if has_extensions_scope or t.name in allowed_prefixes:
-                out.append(t)
-            continue
-        # Regular tools: prefix match (e.g. "host_create" -> "host")
-        prefix = t.name.rsplit("_", 1)[0] if "_" in t.name else t.name
-        if prefix in allowed_prefixes:
-            out.append(t)
-    return out
-
-
-# Built lazily on first access (after ALL_METHODS has finished importing).
-_WRITE_TOOLS: frozenset[str] = frozenset()
-
-
-def _ensure_write_tools_set() -> None:
-    global _WRITE_TOOLS
-    if not _WRITE_TOOLS:
-        _WRITE_TOOLS = _build_write_tools_set()
 
 
 _HOST_RE = re.compile(r"^[A-Za-z0-9.\-]+(:\d{1,5})?$|^\[[0-9A-Fa-f:.]+\](:\d{1,5})?$")
@@ -1392,10 +1284,9 @@ def _make_request_context_middleware(inner_app, trusted_proxies: list[str]):
     """
     import ipaddress
 
-    from zabbix_mcp.token_store import (
+    from zabbix_mcp.auth import (
         current_client_ip as _cip_var,
         current_request_base as _rb_var,
-        current_token_info as _cti_var,
     )
 
     nets = []
@@ -1421,7 +1312,6 @@ def _make_request_context_middleware(inner_app, trusted_proxies: list[str]):
         return any(parsed in net for net in nets)
 
     async def _middleware(scope, receive, send):
-        _cti_var.set(None)
         peer = None
         base = None
         if scope["type"] in ("http", "websocket"):
@@ -1445,7 +1335,6 @@ def _make_request_context_middleware(inner_app, trusted_proxies: list[str]):
         try:
             await inner_app(scope, receive, send)
         finally:
-            _cti_var.set(None)
             _cip_var.set(None)
             _rb_var.set(None)
 
@@ -1460,12 +1349,12 @@ def _report_download_base(config, transport: str) -> tuple[str | None, str | Non
     credential - goes to whatever answers at that address. So a URL is
     only built from an address somebody explicitly vouched for:
 
-    * ``[server].public_url`` - the operator stating the public address.
+    * ``ZABBIX_MCP_SERVER__PUBLIC_URL`` - the operator stating the public address.
       The only correct answer when TLS terminates upstream, since the
       local ``tls_cert_file`` says nothing about the scheme the client
       speaks.
     * ``X-Forwarded-Host`` / ``-Proto`` from a peer in
-      ``[server].trusted_proxies`` - the proxy stating it instead.
+      ``ZABBIX_MCP_SERVER__TRUSTED_PROXIES`` - the proxy stating it instead.
 
     Nothing is inferred from the local bind or from a bare ``Host``
     header; see :func:`_forwarded_base_from_headers` for why the latter
@@ -1479,38 +1368,19 @@ def _report_download_base(config, transport: str) -> tuple[str | None, str | Non
     public = (getattr(config.server, "public_url", "") or "").strip().rstrip("/")
     if public:
         return public, None
-    from zabbix_mcp.token_store import current_request_base
+    from zabbix_mcp.auth import current_request_base
     base = current_request_base.get()
     if base:
         return base.rstrip("/"), None
     return None, (
-        "No download URL: set [server].public_url to the address clients reach this "
+        "No download URL: set ZABBIX_MCP_SERVER__PUBLIC_URL to the address clients reach this "
         "server on (any scheme). Without it the server cannot know which address a "
         "link should point at. The report_uri resource link still works."
     )
 
 
 def _default_server_for_caller(client_manager) -> str | None:
-    """Which Zabbix server a tool call means when it does not say.
-
-    A token scoped to exactly one server can only ever reach that one,
-    so falling back to the *global* default (the first server in the
-    config) just produces a denial naming somebody else's server, for an
-    ordinary question. That is what made the per-user deployment of
-    #74 work only for whoever happened to be listed first.
-
-    Only an unambiguous scope is honoured: a wildcard, several servers,
-    or a name that is not configured all fall back to the global
-    default, and check_token_authorization still has the last word
-    after this - so a caller can only ever land on a server it would
-    have been allowed to name explicitly.
-    """
-    from zabbix_mcp.token_store import current_token_info
-    token = current_token_info.get()
-    if token is not None:
-        allowed = list(getattr(token, "allowed_servers", None) or [])
-        if len(allowed) == 1 and allowed[0] != "*" and allowed[0] in client_manager.server_names:
-            return allowed[0]
+    """Which Zabbix server a tool call means when it does not say."""
     return client_manager.default_server
 
 
@@ -1525,10 +1395,9 @@ def _load_server_icons() -> list[Icon] | None:
     """
     import importlib.resources
     try:
-        # Package-install layout: zabbix_mcp/admin/static/logo-symbol-color.svg
         svg_bytes = (
-            importlib.resources.files("zabbix_mcp.admin")
-            .joinpath("static/logo-symbol-color.svg")
+            importlib.resources.files("zabbix_mcp")
+            .joinpath("assets/logo-symbol-color.svg")
             .read_bytes()
         )
     except (FileNotFoundError, ModuleNotFoundError, OSError):
@@ -1592,56 +1461,25 @@ def _build_transport_security(config: AppConfig, host: str, port: int) -> Transp
     )
 
 
+# Set by run_server from ``ZABBIX_MCP_SERVER__ALLOW_RAW_JSON``.
+_RAW_JSON_ALLOWED = False
+
+
 def _check_raw_json_allowed(raw_json: bool) -> str | None:
-    """If *raw_json* is true, verify the current bearer token has the policy.
+    """If *raw_json* is true, verify the operator allowed it.
 
-    Returns an operator-readable error string on rejection, or None when
-    the request is allowed (raw_json=false, OR raw_json=true with the
-    policy granted on a real token).
-
-    Stdio mode (no bearer token, transport is a local subprocess - typical
-    Claude Desktop install) is treated as a *non-allowed* context: the
-    raw_json flag exists for programmatic non-LLM consumers, and a stdio
-    Claude Desktop session is the prime example of an LLM-facing client
-    that must keep the prompt-injection mitigation preamble. The
-    operator can opt in via the ``[server].stdio_allow_raw_json``
-    config flag if they really do drive the stdio process from a
-    non-LLM script.
+    ``raw_json=true`` strips the prompt-injection preamble from responses.
+    It exists for programmatic, non-LLM consumers, so it stays refused
+    (the default) unless the operator opts in with
+    ``ZABBIX_MCP_SERVER__ALLOW_RAW_JSON=true``.
+    Returns an error string on rejection, or None when the request is allowed.
     """
-    if not raw_json:
+    if not raw_json or _RAW_JSON_ALLOWED:
         return None
-    from zabbix_mcp.token_store import current_token_info
-    tok = current_token_info.get()
-    if tok is None:
-        # Pre-auth / stdio mode. Allow only when the operator has
-        # explicitly opted in via the dedicated config flag - otherwise
-        # default to deny so a stdio LLM client cannot strip its own
-        # prompt-injection mitigation.
-        try:
-            from zabbix_mcp.config import get_config
-            cfg = get_config()
-            if getattr(cfg.server, "stdio_allow_raw_json", False):
-                return None
-        except Exception:
-            # If config is not yet loaded, fail closed.
-            pass
-        return (
-            "raw_json=true is not allowed in stdio mode. "
-            "Set 'stdio_allow_raw_json = true' under [server] in config.toml "
-            "if your stdio client is a non-LLM script. LLM clients "
-            "(Claude Desktop, ...) must keep the disclaimer preamble."
-        )
-    if not getattr(tok, "allow_raw_json", False):
-        logger.warning(
-            "Token '%s' attempted raw_json=true without 'allow_raw_json' policy",
-            tok.name,
-        )
-        return (
-            f"Token '{tok.name}' is not authorized to use raw_json=true. "
-            f"Enable 'Allow raw JSON' on the token in the admin portal "
-            f"(only safe for non-LLM programmatic clients)."
-        )
-    return None
+    return (
+        "raw_json=true is not allowed. Set ZABBIX_MCP_SERVER__ALLOW_RAW_JSON=true "
+        "if the client is a non-LLM script. LLM clients must keep the disclaimer preamble."
+    )
 
 
 def _zone_note(tz: tzinfo) -> str:
@@ -1767,7 +1605,7 @@ def _truncate_result(result: Any, *, max_chars: int = _RESPONSE_MAX_CHARS) -> st
             budget = max_chars
         note = (
             f"\n\n... [TRUNCATED: showing {budget} of {len(result)} characters. "
-            f"Increase response_max_chars in config.toml to see more.]"
+            f"Increase ZABBIX_MCP_SERVER__RESPONSE_MAX_CHARS to see more.]"
         )
         return result[:budget] + note
 
@@ -1842,13 +1680,6 @@ def _make_tool_handler(
         try:
             server_name = client_manager.resolve_server(server_name)
 
-            # Check token authorization (servers, scopes, read_only)
-            from zabbix_mcp.token_store import check_token_authorization
-            _tool_prefix = method_def.tool_name.rsplit("_", 1)[0] if "_" in method_def.tool_name else method_def.tool_name
-            _auth_err = check_token_authorization(server_name, tool_prefix=_tool_prefix, is_write=not method_def.read_only)
-            if _auth_err:
-                raise ToolError(_auth_err)
-
             if not method_def.read_only:
                 client_manager.check_write(server_name)
 
@@ -1872,7 +1703,7 @@ def _make_tool_handler(
             if validate_get and method_def.read_only and "params" not in kwargs:
                 # Refuse what Zabbix would reject or silently ignore, with the
                 # allowed values in the message (api/contracts.py, #98).
-                # [server].validate_get_params = false turns this off.
+                # ZABBIX_MCP_SERVER__VALIDATE_GET_PARAMS = false turns this off.
                 validate_get_params(
                     method_def.api_method, params, zabbix_version,
                     typed=[p.name for p in schema_params],
@@ -1991,8 +1822,6 @@ def _register_tools(
     When *disabled_tools* is set, tools whose prefix matches an entry
     are excluded. This is applied after the allowlist filter.
     """
-    from zabbix_mcp.token_store import check_token_authorization
-
     server_names = client_manager.server_names
     count = 0
 
@@ -2084,12 +1913,6 @@ def _register_tools(
                 method_lower in _KNOWN_READ_ONLY
                 or any(method_lower.endswith(s) for s in _READ_ONLY_SUFFIXES)
             )
-
-            # Token authorization: server + scope + read_only
-            _prefix = method.split(".")[0].lower() if "." in method else ""
-            _auth_err = check_token_authorization(server_name, tool_prefix=_prefix, is_write=not is_read_only)
-            if _auth_err:
-                raise ToolError(_auth_err)
 
             if not is_read_only:
                 client_manager.check_write(server_name)
@@ -2185,9 +2008,6 @@ def _register_tools(
         if _raw_err:
             raise ToolError(_raw_err)
         srv = client_manager.resolve_server(server or _default_server_for_caller(client_manager))
-        _auth_err = check_token_authorization(srv, tool_prefix="graph")
-        if _auth_err:
-            raise ToolError(_auth_err)
         return _raise_if_extension_error(await asyncio.to_thread(
             graph_render, client_manager, srv,
             graphid=graphid, period=period, width=width, height=height,
@@ -2217,9 +2037,6 @@ def _register_tools(
         if _raw_err:
             raise ToolError(_raw_err)
         srv = client_manager.resolve_server(server or _default_server_for_caller(client_manager))
-        _auth_err = check_token_authorization(srv, tool_prefix="host")
-        if _auth_err:
-            raise ToolError(_auth_err)
         return _raise_if_extension_error(await asyncio.to_thread(
             anomaly_detect, client_manager, srv,
             item_key=item_key, hostgroupid=hostgroupid, hostid=hostid,
@@ -2249,9 +2066,6 @@ def _register_tools(
         if _raw_err:
             raise ToolError(_raw_err)
         srv = client_manager.resolve_server(server or _default_server_for_caller(client_manager))
-        _auth_err = check_token_authorization(srv, tool_prefix="host")
-        if _auth_err:
-            raise ToolError(_auth_err)
         return _raise_if_extension_error(await asyncio.to_thread(
             capacity_forecast, client_manager, srv,
             hostid=hostid, item_key=item_key, threshold=threshold, period=period,
@@ -2321,10 +2135,7 @@ def _register_tools(
         if _raw_err:
             raise ToolError(_raw_err)
         srv = client_manager.resolve_server(server or _default_server_for_caller(client_manager))
-        _auth_err = check_token_authorization(srv, tool_prefix="item")
-        if _auth_err:
-            raise ToolError(_auth_err)
-        if validate_get:   # [server].validate_get_params
+        if validate_get:   # ZABBIX_MCP_SERVER__VALIDATE_GET_PARAMS
             try:
                 probe: dict[str, Any] = {}
                 if isinstance(search, dict):
@@ -2393,9 +2204,6 @@ def _register_tools(
         if _raw_err:
             raise ToolError(_raw_err)
         srv = client_manager.resolve_server(server or _default_server_for_caller(client_manager))
-        _auth_err = check_token_authorization(srv, tool_prefix="problem")
-        if _auth_err:
-            raise ToolError(_auth_err)
         return _raise_if_extension_error(await asyncio.to_thread(
             problem_active_get, client_manager, srv,
             severities=severities, hostids=hostids, groupids=groupids,
@@ -2429,11 +2237,6 @@ def _register_tools(
         # Composite read - require scope for every Zabbix endpoint we
         # internally call so a narrow-scoped token can't read problems
         # / items here that it could not pull via problem_get / item_get.
-        _auth_err = check_token_authorization(srv, tool_prefixes=[
-            "host", "hostinterface", "problem", "trigger", "item",
-        ])
-        if _auth_err:
-            raise ToolError(_auth_err)
         return _raise_if_extension_error(await asyncio.to_thread(
             host_status_get, client_manager, srv,
             host_id=host_id, host=host,
@@ -2460,11 +2263,6 @@ def _register_tools(
             raise ToolError(_raw_err)
         srv = client_manager.resolve_server(server or _default_server_for_caller(client_manager))
         # Composite read - covers hostgroup + member host + active problems.
-        _auth_err = check_token_authorization(srv, tool_prefixes=[
-            "hostgroup", "host", "problem", "trigger",
-        ])
-        if _auth_err:
-            raise ToolError(_auth_err)
         return _raise_if_extension_error(await asyncio.to_thread(
             hostgroup_overview_get, client_manager, srv,
             groupid=groupid, group=group, top_n=top_n,
@@ -2491,11 +2289,6 @@ def _register_tools(
         # Composite read - aggregates host / item / trigger / template /
         # problem counts plus per-group breakdown. Requires scope for
         # every endpoint we sum over.
-        _auth_err = check_token_authorization(srv, tool_prefixes=[
-            "host", "hostgroup", "item", "trigger", "template", "problem",
-        ])
-        if _auth_err:
-            raise ToolError(_auth_err)
         return _raise_if_extension_error(await asyncio.to_thread(
             infrastructure_summary_get, client_manager, srv, top_n=top_n,
         ), raw_json=bool(raw_json), tz=await asyncio.to_thread(resolve_zone, client_manager, srv))
@@ -2523,11 +2316,6 @@ def _register_tools(
             raise ToolError(_raw_err)
         srv = client_manager.resolve_server(server or _default_server_for_caller(client_manager))
         # Composite read - item metadata + history + parent host name.
-        _auth_err = check_token_authorization(srv, tool_prefixes=[
-            "item", "history", "host",
-        ])
-        if _auth_err:
-            raise ToolError(_auth_err)
         return _raise_if_extension_error(await asyncio.to_thread(
             item_history_summary_get, client_manager, srv,
             itemid=itemid, host=host, key=key, period=period, limit=limit,
@@ -2594,20 +2382,6 @@ def _register_tools(
                 config.reporting.link_ttl, config.reporting.link_max_reports,
             )
 
-            # Load custom templates from [report_templates.*] config sections
-            try:
-                from zabbix_mcp.admin.config_writer import load_config_document as _load_cfg_doc, TOMLKIT_AVAILABLE as _TK
-                if _TK:
-                    _cfg_path = getattr(config, "_config_path", None)
-                    if _cfg_path:
-                        _cfg_doc = _load_cfg_doc(_cfg_path)
-                        _custom_tmpls = _cfg_doc.get("report_templates", {})
-                        if _custom_tmpls:
-                            report_engine.load_custom_templates({k: dict(v) for k, v in _custom_tmpls.items()})
-                            logger.info("Loaded %d custom report templates", len(_custom_tmpls))
-            except Exception as _e:
-                logger.warning("Failed to load custom report templates: %s", _e)
-
             async def _report_generate_work(
                 *, report_type: str, hostgroupid: str,
                 period: str | None, company: str | None, server: str | None,
@@ -2617,9 +2391,6 @@ def _register_tools(
                 """Synchronous PDF generation - shared between sync and task-augmented paths."""
                 from zabbix_mcp.reporting import data_fetcher
                 srv = client_manager.resolve_server(server or _default_server_for_caller(client_manager))
-                _auth_err = check_token_authorization(srv, tool_prefix="host")
-                if _auth_err:
-                    raise ToolError(_auth_err)
 
                 valid_types = tuple(_REPORT_TEMPLATES.keys())
                 if report_type not in valid_types:
@@ -2790,7 +2561,7 @@ def _register_tools(
                 period: Annotated[Optional[str], Field(description="Report period: '7d', '30d', '90d' (default: '30d')")] = "30d",
                 company: Annotated[Optional[str], Field(description="Company name for report header (overrides config)")] = None,
                 server: Annotated[Optional[str], Field(description=server_desc)] = None,
-                save_to_file: Annotated[bool, Field(description="Write the PDF to the server's configured report directory instead of returning it inline. Requires [reporting].output_dir. Returns the path.")] = False,
+                save_to_file: Annotated[bool, Field(description="Write the PDF to the server's configured report directory instead of returning it inline. Requires ZABBIX_MCP_REPORTING__OUTPUT_DIR. Returns the path.")] = False,
                 email_to: Annotated[Optional[str], Field(description="Comma-separated recipients to email the PDF to as an attachment instead of returning it inline. Requires [reporting.email] and each address must match the operator's allowed_recipients.")] = None,
                 as_link: Annotated[bool, Field(description="Default true: return a link (an https download_url the user can click, plus the zabbix://reports/<id> MCP resource) instead of the PDF itself, so the document stays out of the conversation context. Set false to force the inline base64 data URI, which is only practical for small reports.")] = True,
             ):
@@ -2862,12 +2633,6 @@ def _register_tools(
         token to actually execute it. Tokens expire after 5 minutes."""
         srv = client_manager.resolve_server(server or _default_server_for_caller(client_manager))
 
-        # Token authorization: server + write permission
-        _prefix = action.split(".")[0].lower() if "." in action else ""
-        _auth_err = check_token_authorization(srv, tool_prefix=_prefix, is_write=True)
-        if _auth_err:
-            raise ToolError(_auth_err)
-
         try:
             client_manager.check_write(srv)
         except ReadOnlyError as e:
@@ -2877,10 +2642,8 @@ def _register_tools(
         token = secrets.token_urlsafe(32)
         expires = time.time() + 300  # 5 minutes
 
-        # Bind to caller token for security (prevent cross-token confirmation)
-        from zabbix_mcp.token_store import current_token_info as _cti
-        _caller_token = _cti.get()
-        _caller_id = _caller_token.id if _caller_token else None
+        # Bind to the caller's bearer token (prevent cross-token confirmation)
+        _caller_id = caller_fingerprint()
 
         with _pending_actions_lock:
             # Cleanup expired tokens under the same lock that guards the
@@ -2946,23 +2709,15 @@ def _register_tools(
             raise ToolError("Invalid or expired confirmation token.")
 
         # Verify caller identity matches the preparer
-        from zabbix_mcp.token_store import current_token_info as _cti
-        _caller_token = _cti.get()
-        _caller_id = _caller_token.id if _caller_token else None
+        _caller_id = caller_fingerprint()
         if action_data.get("caller_token_id") != _caller_id:
             raise ToolError("Confirmation token was prepared by a different caller. Access denied.")
 
         if action_data["expires"] < time.time():
             raise ToolError("Confirmation token has expired. Prepare the action again.")
 
-        # Check authorization again here, not only in action_prepare: the
-        # token's read_only flag or the server's may have changed in the
-        # five minutes between the two calls, and this is the call that
-        # writes.
-        _prefix = action_data["action"].split(".")[0].lower() if "." in action_data["action"] else ""
-        _auth_err = check_token_authorization(action_data["server"], tool_prefix=_prefix, is_write=True)
-        if _auth_err:
-            raise ToolError(_auth_err)
+        # Check the server's read_only flag again here, not only in
+        # action_prepare, and this is the call that writes.
         try:
             client_manager.check_write(action_data["server"])
         except ReadOnlyError as e:
@@ -2993,24 +2748,6 @@ def _register_tools(
         count += 1
 
     return count
-
-
-class _BearerTokenVerifier:
-    """Simple bearer token verifier for HTTP transport authentication."""
-
-    def __init__(self, expected_token: str) -> None:
-        self._expected_token = expected_token
-
-    async def verify_token(self, token: str) -> AccessToken | None:
-        # Use constant-time comparison to prevent timing attacks
-        if hmac.compare_digest(token, self._expected_token):
-            return AccessToken(
-                token=token,
-                client_id="mcp-client",
-                scopes=["all"],
-                expires_at=int(time.time()) + 86400,
-            )
-        return None
 
 
 class _IPAllowlistMiddleware:
@@ -3058,30 +2795,14 @@ def _register_resources(mcp: MCPServer, client_manager: ClientManager) -> None:
     """Expose the default server's hosts / problems / host groups /
     templates as browsable MCP resources.
 
-    Lived inline in run_server until v1.37.3; pulled out so the
-    authorization guard on each resource can be tested without
-    starting a transport.
+    Pulled out of run_server so it can be tested without starting a transport.
     """
-    from mcp.server.mcpserver.exceptions import ResourceError
-    from zabbix_mcp.token_store import check_token_authorization
-
     default_srv = client_manager.default_server
-
-    def _resource_guard(prefix: str) -> None:
-        # Resources went straight to the Zabbix API; a token scoped to
-        # another server, or without the scope that covers the data,
-        # could still read it here. Same check the tools run.
-        err = check_token_authorization(default_srv, tool_prefix=prefix)
-        if err:
-            # ResourceError reaches the client with its message; any
-            # other exception is masked as "Error reading resource".
-            raise ResourceError(err)
 
     if default_srv:
         @mcp.resource(f"zabbix://{default_srv}/hosts")
         async def resource_hosts() -> str:
             """List of all monitored hosts."""
-            _resource_guard("host")
             result = await asyncio.to_thread(
                 client_manager.call, default_srv, "host.get",
                 {"output": ["hostid", "host", "name", "status"], "sortfield": "name"},
@@ -3091,7 +2812,6 @@ def _register_resources(mcp: MCPServer, client_manager: ClientManager) -> None:
         @mcp.resource(f"zabbix://{default_srv}/problems")
         async def resource_problems() -> str:
             """Currently active problems."""
-            _resource_guard("problem")
             result = await asyncio.to_thread(
                 client_manager.call, default_srv, "problem.get",
                 {"output": "extend", "recent": True, "sortfield": ["eventid"], "sortorder": "DESC", "limit": 100},
@@ -3101,7 +2821,6 @@ def _register_resources(mcp: MCPServer, client_manager: ClientManager) -> None:
         @mcp.resource(f"zabbix://{default_srv}/hostgroups")
         async def resource_hostgroups() -> str:
             """All host groups."""
-            _resource_guard("hostgroup")
             result = await asyncio.to_thread(
                 client_manager.call, default_srv, "hostgroup.get",
                 {"output": ["groupid", "name"], "sortfield": "name"},
@@ -3111,7 +2830,6 @@ def _register_resources(mcp: MCPServer, client_manager: ClientManager) -> None:
         @mcp.resource(f"zabbix://{default_srv}/templates")
         async def resource_templates() -> str:
             """All templates."""
-            _resource_guard("template")
             result = await asyncio.to_thread(
                 client_manager.call, default_srv, "template.get",
                 {"output": ["templateid", "host", "name"], "sortfield": "name"},
@@ -3129,21 +2847,9 @@ def run_server(
     port: int = 8080,
 ) -> None:
     """Create and run the MCP server."""
-    # Store runtime port for admin portal MCP health check
-    object.__setattr__(config, '_runtime_port', port)
-
-    # Migrate custom report templates from the legacy v1.16 location to the
-    # current v1.17+ location. For host installs deploy/install.sh handles
-    # this, but container deployments do not use the installer so we run it
-    # here. No-op if there is nothing to migrate.
-    from zabbix_mcp.template_migration import migrate_custom_templates
-    migrate_custom_templates(getattr(config, "_config_path", None))
-
-    # Bootstrap a first-run admin user if the admin portal is enabled but no
-    # users exist yet. Host installs get this from install.sh setup_admin;
-    # container deployments need it done here. No-op on subsequent restarts.
-    from zabbix_mcp.admin_bootstrap import bootstrap_admin_if_needed
-    bootstrap_admin_if_needed(getattr(config, "_config_path", None))
+    config._runtime_port = port
+    global _RAW_JSON_ALLOWED
+    _RAW_JSON_ALLOWED = config.server.allow_raw_json
 
     client_manager = ClientManager(config)
     client_manager.warm_versions()
@@ -3151,216 +2857,51 @@ def run_server(
     # Determine URL scheme based on TLS configuration
     scheme = "https" if config.server.tls_cert_file else "http"
 
-    # Initialize token store (multi-token auth)
-    from zabbix_mcp.token_store import TokenStore, MultiTokenVerifier
-    token_store = TokenStore()
-
-    # Load tokens from [tokens.*] config sections
-    try:
-        from zabbix_mcp.admin.config_writer import load_config_document, TOMLKIT_AVAILABLE
-        if TOMLKIT_AVAILABLE:
-            config_path = getattr(config, "_config_path", None)
-            if config_path:
-                doc = load_config_document(config_path)
-                tokens_raw = doc.get("tokens", {})
-                if tokens_raw:
-                    token_store.load_from_config({k: dict(v) for k, v in tokens_raw.items()})
-                    logger.info("Loaded %d MCP tokens from config", token_store.token_count)
-    except Exception as e:
-        logger.warning("Failed to load tokens from config: %s", e)
-
-    # Legacy auth_token fallback — also persist to config so it survives token reload
-    if config.server.auth_token and token_store.token_count == 0:
-        token_store.load_legacy_token(config.server.auth_token)
-        logger.info("Using legacy auth_token (migrate to [tokens] for multi-token support)")
-        # Write legacy token to config.toml so it persists across reloads
-        config_path = getattr(config, "_config_path", None)
-        if config_path:
-            try:
-                from zabbix_mcp.admin.config_writer import load_config_document, save_config_document, TOMLKIT_AVAILABLE
-                if TOMLKIT_AVAILABLE:
-                    doc = load_config_document(config_path)
-                    if "tokens" not in doc or "legacy" not in doc.get("tokens", {}):
-                        import tomlkit, hashlib
-                        if "tokens" not in doc:
-                            doc.add("tokens", tomlkit.table(is_super_table=True))
-                        legacy_hash = f"sha256:{hashlib.sha256(config.server.auth_token.encode()).hexdigest()}"
-                        legacy_table = tomlkit.table()
-                        legacy_table["name"] = "Legacy Token"
-                        legacy_table["token_hash"] = legacy_hash
-                        legacy_table["scopes"] = ["*"]
-                        legacy_table["read_only"] = False
-                        legacy_table["is_legacy"] = True
-                        doc["tokens"]["legacy"] = legacy_table
-                        save_config_document(config_path, doc)
-                        logger.info("Legacy auth_token persisted to [tokens.legacy] in config")
-            except Exception as e:
-                logger.warning("Could not persist legacy token to config: %s", e)
-
-    # Set up bearer token auth for HTTP transport
+    # Bearer token auth for the HTTP transports. The token comes from the
+    # environment (Vault in Kubernetes); stdio needs none.
     auth_kwargs: dict[str, Any] = {}
-    oauth_provider = None  # set below when [oauth].enabled
-    has_auth = (
-        token_store.token_count > 0
-        or config.server.auth_token
-        or config.oauth.enabled
+    auth_token = (
+        config.server.auth_token.get_secret_value() if config.server.auth_token else None
     )
-    if has_auth and transport in ("http", "sse"):
-        # Prefer the operator's explicit public URL when set (deployments
-        # behind a reverse proxy, NAT, or with the bind host = 0.0.0.0).
-        # Without this, OAuth discovery advertises the literal bind host
-        # (e.g. "https://0.0.0.0:8080/") which remote clients cannot
-        # reach - reported in discussion #19.
-        public_url = (getattr(config.server, "public_url", "") or "").rstrip("/")
-        server_url = public_url or f"{scheme}://{host}:{port}"
-
-        if config.oauth.enabled:
-            from zabbix_mcp.oauth_provider import ZmcpOAuthProvider
-            from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
-
-            cfg_path_for_oauth = getattr(config, "_config_path", None)
-
-            def _load_clients() -> dict[str, Any]:
-                """Hydrate the in-memory client table from [oauth_clients.*]."""
-                from mcp.shared.auth import OAuthClientInformationFull
-                if not cfg_path_for_oauth:
-                    return {}
-                try:
-                    doc = load_config_document(cfg_path_for_oauth)
-                except Exception:
-                    return {}
-                raw = doc.get("oauth_clients", {}) or {}
-                out: dict[str, Any] = {}
-                for cid, body in raw.items():
-                    body = dict(body)
-                    # Lift our own extension fields off the raw dict before
-                    # handing it to the framework's pydantic model (which
-                    # rejects unknown keys).  Stored back as private
-                    # attributes the provider reads off the client object.
-                    allowed_ips = body.pop("allowed_ips", None) or []
-                    access_ttl = body.pop("access_token_ttl_seconds", None)
-                    refresh_ttl = body.pop("refresh_token_ttl_seconds", None)
-                    try:
-                        ci = OAuthClientInformationFull.model_validate(body)
-                    except Exception as exc:
-                        logger.warning("Skipping malformed [oauth_clients.%s]: %s", cid, exc)
-                        continue
-                    if allowed_ips:
-                        object.__setattr__(ci, "_allowed_ips", list(allowed_ips))
-                    if access_ttl:
-                        object.__setattr__(ci, "_access_ttl", int(access_ttl))
-                    if refresh_ttl:
-                        object.__setattr__(ci, "_refresh_ttl", int(refresh_ttl))
-                    out[cid] = ci
-                return out
-
-            def _persist_client(client_info: Any) -> None:
-                """Write a newly-registered client back to config.toml."""
-                if not cfg_path_for_oauth:
-                    return
-                from zabbix_mcp.admin.config_writer import add_config_table
-                # OAuthClientInformationFull -> serializable dict
-                body = client_info.model_dump(mode="json", exclude_none=True)
-                # Tomlkit cannot store None; ensure no nulls slipped in.
-                body = {k: v for k, v in body.items() if v is not None}
-                try:
-                    add_config_table(cfg_path_for_oauth, "oauth_clients",
-                                     str(client_info.client_id), body)
-                except ValueError:
-                    # Already registered: update in place via sub-table replace.
-                    from zabbix_mcp.admin.config_writer import (
-                        load_config_document, save_config_document,
-                    )
-                    doc = load_config_document(cfg_path_for_oauth)
-                    import tomlkit
-                    if "oauth_clients" not in doc:
-                        doc.add("oauth_clients", tomlkit.table(is_super_table=True))
-                    sub = tomlkit.table()
-                    for k, v in body.items():
-                        sub.add(k, v)
-                    doc["oauth_clients"][str(client_info.client_id)] = sub
-                    save_config_document(cfg_path_for_oauth, doc)
-                # The running provider already holds this client, so the
-                # write is persistence for the NEXT boot only - re-baseline
-                # the admin portal's drift detector instead of leaving it
-                # to raise a false "restart needed" banner (issue #69).
-                try:
-                    from zabbix_mcp.admin.app import refresh_config_baseline
-                    refresh_config_baseline()
-                except Exception:
-                    logger.debug("Could not refresh admin restart baseline", exc_info=True)
-
-            oauth_provider = ZmcpOAuthProvider(
-                public_url=server_url,
-                token_store=token_store,
-                login_path=config.oauth.login_path,
-                registered_clients_loader=_load_clients,
-                register_client_persister=_persist_client,
-                auth_code_ttl_seconds=config.oauth.auth_code_ttl_seconds,
-                access_token_ttl_seconds=config.oauth.access_token_ttl_seconds,
-                refresh_token_ttl_seconds=config.oauth.refresh_token_ttl_seconds,
+    public_url = (config.server.public_url or "").rstrip("/")
+    server_url = public_url or f"{scheme}://{host}:{port}"
+    if transport in ("http", "sse") and auth_token:
+        verifier = BearerTokenVerifier(auth_token, config.server.auth_token_expires_at)
+        if verifier.expired:
+            logger.warning(
+                "ZABBIX_MCP_SERVER__AUTH_TOKEN expired at %s - every request will be "
+                "rejected until it is rotated.", config.server.auth_token_expires_at,
             )
-            auth_kwargs["auth_server_provider"] = oauth_provider
-            auth_kwargs["auth"] = AuthSettings(
-                issuer_url=server_url,
-                resource_server_url=server_url,
-                client_registration_options=ClientRegistrationOptions(
-                    enabled=config.oauth.dynamic_registration_enabled,
-                    valid_scopes=None,
-                    default_scopes=list(config.oauth.default_scopes),
-                ),
-                revocation_options=RevocationOptions(enabled=True),
-            )
-            if not public_url:
-                logger.warning(
-                    "[oauth].enabled is true but [server].public_url is not set. "
-                    "OAuth metadata will advertise '%s' which most remote MCP "
-                    "clients (Claude Desktop, ChatGPT custom apps) will not be "
-                    "able to reach. Set public_url to the externally-reachable "
-                    "https URL (e.g. \"https://mcp.example.com\").",
-                    server_url,
-                )
+        auth_kwargs["token_verifier"] = verifier
+        auth_kwargs["auth"] = AuthSettings(
+            issuer_url=server_url,
+            resource_server_url=server_url,
+        )
+        if public_url:
             logger.info(
-                "MCP auth: OAuth 2.1 authorization server enabled (issuer %s, "
-                "login at %s, dynamic registration: %s)",
-                server_url, config.oauth.login_path,
-                "yes" if config.oauth.dynamic_registration_enabled else "no",
+                "MCP auth: bearer token authentication enabled (advertising %s "
+                "from public_url)", server_url,
             )
         else:
-            if token_store.token_count > 0:
-                auth_kwargs["token_verifier"] = MultiTokenVerifier(token_store)
-            else:
-                auth_kwargs["token_verifier"] = _BearerTokenVerifier(config.server.auth_token)
-            auth_kwargs["auth"] = AuthSettings(
-                issuer_url=server_url,
-                resource_server_url=server_url,
-            )
-            if public_url:
-                logger.info(
-                    "MCP auth_token: bearer token authentication enabled (advertising %s "
-                    "from [server].public_url override)",
-                    server_url,
+            logger.info("MCP auth: bearer token authentication enabled")
+            if host in ("0.0.0.0", "::"):
+                logger.warning(
+                    "Bind host is %s but public_url is not set - auth discovery "
+                    "will advertise '%s' which remote MCP clients cannot reach. "
+                    "Set ZABBIX_MCP_SERVER__PUBLIC_URL to the externally-reachable "
+                    "URL (e.g. \"https://mcp.example.com\").",
+                    host, server_url,
                 )
-            else:
-                logger.info("MCP auth_token: bearer token authentication enabled")
-                if host in ("0.0.0.0", "::"):
-                    logger.warning(
-                        "Bind host is %s but [server].public_url is not set - OAuth "
-                        "discovery will advertise '%s' which remote MCP clients "
-                        "cannot reach. Set public_url to the externally-reachable "
-                        "URL (e.g. \"https://mcp.example.com:8080\").",
-                        host, server_url,
-                    )
-    elif transport in ("http", "sse") and not config.server.auth_token:
+    elif transport in ("http", "sse"):
         if host == "127.0.0.1":
             logger.info(
-                "No MCP auth_token configured — server accepts unauthenticated "
+                "No MCP auth token configured - server accepts unauthenticated "
                 "connections (safe: listening on localhost only)"
             )
         else:
             logger.warning(
-                "No MCP auth_token configured — server is unauthenticated on %s! "
-                "Set auth_token in config.toml to require bearer token authentication.",
+                "No MCP auth token configured - server is unauthenticated on %s! "
+                "Set ZABBIX_MCP_SERVER__AUTH_TOKEN to require bearer token authentication.",
                 host,
             )
 
@@ -3368,11 +2909,13 @@ def run_server(
     if transport in ("http", "sse"):
         logger.warning("--- Security status ---")
 
-        # Authentication: legacy auth_token OR new [tokens.*] multi-token system
-        if token_store.token_count > 0:
-            logger.warning("  MCP auth:           ENABLED (%d token(s) from [tokens.*])", token_store.token_count)
-        elif config.server.auth_token:
-            logger.warning("  MCP auth:           ENABLED (legacy auth_token)")
+        # Authentication
+        if config.server.auth_token:
+            exp = config.server.auth_token_expires_at
+            logger.warning(
+                "  MCP auth:           ENABLED (bearer token%s)",
+                f", expires {exp.isoformat()}" if exp else "",
+            )
         elif host == "127.0.0.1":
             logger.warning("  MCP auth:           not set (localhost only - OK)")
         else:
@@ -3387,18 +2930,17 @@ def run_server(
             else:
                 logger.warning("  TLS:                disabled (localhost only)")
 
-        # Public URL (advertised to MCP clients during OAuth discovery).
+        # Public URL (advertised to MCP clients during auth discovery).
         # When unset and bind host is a wildcard, remote clients cannot
         # follow the discovery URL - flag it loudly.
         public_url_cfg = (getattr(config.server, "public_url", "") or "").strip()
         if public_url_cfg:
-            logger.warning("  Public URL:         %s (from [server].public_url)", public_url_cfg)
+            logger.warning("  Public URL:         %s (from ZABBIX_MCP_SERVER__PUBLIC_URL)", public_url_cfg)
         elif host in ("0.0.0.0", "::"):
             logger.warning(
-                "  Public URL:         NOT SET - OAuth discovery advertises '%s://%s:%d/' "
+                "  Public URL:         NOT SET - auth discovery advertises '%s://%s:%d/' "
                 "which remote MCP clients (Claude Desktop, mcp-remote, ...) cannot reach. "
-                "Set [server].public_url in config.toml or via the admin portal "
-                "Settings -> MCP Server -> Public URL.",
+                "Set ZABBIX_MCP_SERVER__PUBLIC_URL",
                 scheme, host, port,
             )
         else:
@@ -3447,13 +2989,13 @@ def run_server(
         # Count warnings and show hint
         warnings = []
         if not config.server.auth_token:
-            warnings.append("auth_token")
+            warnings.append("SERVER__AUTH_TOKEN")
         if not config.server.tls_cert_file and host != "127.0.0.1":
-            warnings.append("tls_cert_file/tls_key_file")
+            warnings.append("SERVER__TLS_CERT_FILE/TLS_KEY_FILE")
         if not config.server.allowed_hosts:
-            warnings.append("allowed_hosts")
+            warnings.append("SERVER__ALLOWED_HOSTS")
         if config.server.rate_limit <= 0:
-            warnings.append("rate_limit")
+            warnings.append("SERVER__RATE_LIMIT")
         if writable:
             warnings.append("read_only")
         if no_ssl:
@@ -3461,7 +3003,7 @@ def run_server(
         if warnings:
             logger.warning(
                 "  Review disabled security features above. "
-                "Adjust in config.toml: %s", ", ".join(warnings),
+                "Adjust the ZABBIX_MCP_* environment variables: %s", ", ".join(warnings),
             )
         else:
             logger.info("  All security features are properly configured.")
@@ -3482,8 +3024,8 @@ def run_server(
     elif host not in ("127.0.0.1", "localhost", "::1") and transport != "stdio":
         logger.warning(
             "DNS rebinding protection is OFF (host='%s', no public_url / allowed_hosts / allowed_origins set). "
-            "MCP 2025-11-25 spec recommends Origin/Host validation. Set [server].public_url or "
-            "[server].allowed_origins in config.toml to enable.",
+            "MCP 2025-11-25 spec recommends Origin/Host validation. Set ZABBIX_MCP_SERVER__PUBLIC_URL or "
+            "ZABBIX_MCP_SERVER__ALLOWED_ORIGINS to enable.",
             host,
         )
 
@@ -3553,7 +3095,7 @@ def run_server(
             if tool.name in _TASK_AUGMENTED_TOOLS:
                 tool.execution = ToolExecution(taskSupport="optional")
         result.tools = _annotate_tools_by_version(
-            _filter_tools_by_token(result.tools), client_manager,
+            result.tools, client_manager,
         )
         # 2026-07-28 CacheableResult freshness hint. The catalog only
         # changes on restart, so a few minutes of client-side caching
@@ -3579,9 +3121,6 @@ def run_server(
         # override it, and stdio has no HTTP listener to link to.
         transport=transport,
     )
-    # Build the write-tools set for the tools/list scope filter once we
-    # know everything that will ever be registered.
-    _ensure_write_tools_set()
     if config.server.tools or config.server.disabled_tools:
         parts = []
         if config.server.tools:
@@ -3614,7 +3153,7 @@ def run_server(
         # capability URL): unguessable, single-report, dead as soon as it
         # expires. It is deliberately reachable without a bearer token,
         # because the point is that a human can open it in a browser.
-        # Operators who do not want that set [reporting].download_urls
+        # Operators who do not want that set ZABBIX_MCP_REPORTING__DOWNLOAD_URLS
         # = false and keep the MCP link only.
         if config is not None and config.reporting.download_urls:
             from starlette.responses import Response as _StarletteResponse
@@ -3635,11 +3174,11 @@ def run_server(
                     "Report download URLs will be served over plaintext HTTP (%s). The "
                     "report id acts as a password and the PDF is unencrypted in "
                     "transit. Terminate TLS in front of the server and set "
-                    "[server].public_url to the https address, or disable "
-                    "[reporting].download_urls.", _pub or f"http://{host}:{port}")
+                    "ZABBIX_MCP_SERVER__PUBLIC_URL to the https address, or disable "
+                    "ZABBIX_MCP_REPORTING__DOWNLOAD_URLS.", _pub or f"http://{host}:{port}")
             elif not _pub:
                 logger.warning(
-                    "Report download URLs are enabled but [server].public_url is not "
+                    "Report download URLs are enabled but ZABBIX_MCP_SERVER__PUBLIC_URL is not "
                     "set, so no link can be built unless a proxy listed in "
                     "trusted_proxies sends X-Forwarded-Host and X-Forwarded-Proto. "
                     "Reports will be delivered as MCP resource links only.")
@@ -3666,44 +3205,6 @@ def run_server(
                         "X-Content-Type-Options": "nosniff",
                     },
                 )
-
-        # OAuth login + consent UI - only registered when [oauth].enabled.
-        # Lives on the MCP port (same origin as the issuer URL) so the
-        # browser does not have to deal with cross-origin cookies during
-        # the authorize redirect dance.  The login page reuses the admin
-        # portal's templates + ``static/style.css`` so the surface looks
-        # identical to the portal's own login screen; we mount the same
-        # static directory at ``/static/`` on the MCP port for that.
-        if oauth_provider is not None:
-            from pathlib import Path
-            from starlette.responses import HTMLResponse, RedirectResponse, FileResponse
-            from zabbix_mcp.oauth_login import handle_oauth_login
-
-            login_path = config.oauth.login_path
-            _admin_static_dir = Path(__file__).parent / "admin" / "static"
-
-            @mcp.custom_route(login_path, methods=["GET", "POST"])
-            async def http_oauth_login(request: Request):
-                return await handle_oauth_login(
-                    request, oauth_provider, config,
-                )
-
-            @mcp.custom_route("/static/{filename:path}", methods=["GET"])
-            async def http_oauth_static(request: Request):
-                # Serve admin portal assets (style.css, logo*.svg, ...) from
-                # the MCP port so the OAuth login HTML can pull them via a
-                # same-origin ``/static/...`` reference.  Path traversal is
-                # blocked by ``Path.resolve().is_relative_to()``.
-                fname = request.path_params.get("filename", "")
-                root = _admin_static_dir.resolve()
-                target = (_admin_static_dir / fname).resolve()
-                try:
-                    inside = target.is_relative_to(root)
-                except ValueError:
-                    inside = False
-                if not target.is_file() or not inside:
-                    return JSONResponse({"error": "not found"}, status_code=404)
-                return FileResponse(str(target))
 
     try:
         if transport in ("http", "sse"):
@@ -3740,7 +3241,7 @@ def run_server(
                 asgi_app.router.lifespan_context = _lifespan_with_cleanup
 
             # Capture client IP in context var for token IP allowlist checks.
-            # When behind a reverse proxy listed in [server].trusted_proxies,
+            # When behind a reverse proxy listed in ZABBIX_MCP_SERVER__TRUSTED_PROXIES,
             # honor the first entry of X-Forwarded-For (the original client);
             # otherwise the raw TCP peer is used so an untrusted client
             # cannot impersonate an arbitrary IP via XFF.
@@ -3777,58 +3278,6 @@ def run_server(
                 uvicorn_kwargs["ssl_certfile"] = config.server.tls_cert_file
                 uvicorn_kwargs["ssl_keyfile"] = config.server.tls_key_file
                 logger.info("TLS enabled (cert: %s)", config.server.tls_cert_file)
-
-            # Start admin portal on separate port (if configured)
-            admin_config = getattr(config.server, "_admin_config", None)
-            admin_enabled = False
-            config_path = getattr(config, "_config_path", None)
-
-            if config_path:
-                try:
-                    from zabbix_mcp.admin.config_writer import load_config_document, TOMLKIT_AVAILABLE
-                    if TOMLKIT_AVAILABLE:
-                        doc = load_config_document(config_path)
-                        admin_section = doc.get("admin", {})
-                        admin_enabled = admin_section.get("enabled", False)
-                except Exception:
-                    pass
-
-            if admin_enabled and config_path:
-                admin_port = admin_section.get("port", 9090)
-                # Admin shares host and TLS with MCP server
-                admin_host = host
-
-                from zabbix_mcp.admin.app import AdminApp
-                admin_app_instance = AdminApp(
-                    config=config,
-                    config_path=config_path,
-                    client_manager=client_manager,
-                    token_store=token_store,
-                    oauth_provider=oauth_provider,
-                )
-
-                # Run admin on a separate thread with its own uvicorn
-                import threading
-
-                admin_uvicorn_kwargs: dict[str, Any] = {
-                    "host": admin_host,
-                    "port": admin_port,
-                    "log_level": "warning",
-                    "access_log": False,
-                }
-                # Share TLS certificates with MCP server
-                if config.server.tls_cert_file and config.server.tls_key_file:
-                    admin_uvicorn_kwargs["ssl_certfile"] = config.server.tls_cert_file
-                    admin_uvicorn_kwargs["ssl_keyfile"] = config.server.tls_key_file
-
-                def _run_admin():
-                    import uvicorn as admin_uvicorn
-                    admin_uvicorn.run(admin_app_instance.app, **admin_uvicorn_kwargs)
-
-                admin_thread = threading.Thread(target=_run_admin, daemon=True)
-                admin_thread.start()
-                admin_scheme = "https" if config.server.tls_cert_file else "http"
-                logger.info("Admin portal: %s://%s:%d/", admin_scheme, admin_host, admin_port)
 
             logger.info("#### Zabbix MCP Server started successfully ####")
             uvicorn.run(asgi_app, **uvicorn_kwargs)

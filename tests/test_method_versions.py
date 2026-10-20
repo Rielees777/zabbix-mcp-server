@@ -167,8 +167,6 @@ class TestToolsListAnnotation(unittest.TestCase):
 
     def tearDown(self):
         self._patch.stop()
-        from zabbix_mcp.token_store import current_token_info
-        current_token_info.set(None)
 
     def _names(self, tools):
         return {t.name: t for t in tools}
@@ -217,16 +215,6 @@ class TestToolsListAnnotation(unittest.TestCase):
         self.assertIn("not on 'new' - host.massupdate was removed in Zabbix 8.0", out["host_massupdate"].description)
         self._with_versions({"new": "8.0.0", "old": "8.0.0"})
         self.assertNotIn("host_massupdate", self._names(_annotate_tools_by_version(self.tools, self.mgr)))
-
-    def test_token_scoped_to_one_server_sees_that_server_only(self):
-        from zabbix_mcp.server import _annotate_tools_by_version
-        from zabbix_mcp.token_store import TokenInfo, current_token_info
-        self._with_versions({"new": "7.4.14", "old": "6.0.30"})
-        current_token_info.set(TokenInfo(id="t", name="t", token_hash="sha256:x", allowed_servers=["new"]))
-        out = self._names(_annotate_tools_by_version(self.tools, self.mgr))
-        self.assertNotIn("Zabbix version note", out["proxygroup_get"].description)
-        current_token_info.set(TokenInfo(id="t", name="t", token_hash="sha256:x", allowed_servers=["old"]))
-        self.assertNotIn("proxygroup_get", self._names(_annotate_tools_by_version(self.tools, self.mgr)))
 
 
 class TestHealthCheckAndWarmup(unittest.TestCase):

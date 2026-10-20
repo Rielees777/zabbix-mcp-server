@@ -22,11 +22,11 @@
 A UK operator asked for "the last hour of problems" at 20:00 BST and got
 18:00-19:00: the server returned bare epochs, read a zone-less input as
 UTC and never told the model what time it was where the operator sat.
-These tests cover the zone resolution chain (token > Zabbix entry >
-[server] > Zabbix user > Zabbix frontend default > host), the
+These tests cover the zone resolution chain (Zabbix entry >
+server default > Zabbix user > Zabbix frontend default > host), the
 ``<field>_local`` siblings, the time-zone note on every response, the
 zone-less input rule, the Zabbix-side lookup with its cache, and the
-config / token validation.
+config validation.
 """
 
 import asyncio
@@ -42,9 +42,9 @@ sys.path.insert(0, "src")
 
 from zabbix_mcp import timezones  # noqa: E402
 from zabbix_mcp.client import ClientManager  # noqa: E402
-from zabbix_mcp.config import AppConfig, ConfigError, ServerConfig, ZabbixServerConfig  # noqa: E402
+from pydantic import ValidationError  # noqa: E402
+from zabbix_mcp.config import AppConfig, ServerConfig, ZabbixServerConfig  # noqa: E402
 from zabbix_mcp.server import _build_zabbix_params, _format_result, _register_tools, _try_parse_timestamp  # noqa: E402
-from zabbix_mcp.token_store import TokenInfo, current_token_info  # noqa: E402
 
 T0 = 1775030400  # 2026-04-01T08:00:00Z = 09:00 BST = 17:00 JST
 LONDON = ZoneInfo("Europe/London")
@@ -132,15 +132,6 @@ class TestResolveZone(unittest.TestCase):
                 raise RuntimeError("boom")
             return self._zone
 
-    def tearDown(self):
-        current_token_info.set(None)
-
-    def test_token_wins(self):
-        current_token_info.set(TokenInfo(id="t", name="t", token_hash="sha256:x", timezone="Asia/Tokyo"))
-        mgr = self._Mgr(_config(server_tz="UTC", zabbix_tz="Europe/London"), zabbix_zone="America/New_York")
-        self.assertEqual(timezones.zone_name(timezones.resolve_zone(mgr, "t")), "Asia/Tokyo")
-        self.assertEqual(mgr.asked, 0)
-
     def test_zabbix_entry_beats_server_default(self):
         mgr = self._Mgr(_config(server_tz="UTC", zabbix_tz="Europe/London"), zabbix_zone="America/New_York")
         self.assertEqual(timezones.zone_name(timezones.resolve_zone(mgr, "t")), "Europe/London")
@@ -165,23 +156,6 @@ class TestResolveZone(unittest.TestCase):
         with patch.dict(os.environ, {"TZ": "Australia/Sydney"}):
             mgr = self._Mgr(_config(), fail=True)
             self.assertEqual(timezones.zone_name(timezones.resolve_zone(mgr, "t")), "Australia/Sydney")
-
-    def test_browser_reported_zone_ranks_below_the_operator_pins(self):
-        """An OAuth token carrying only the browser's zone (implicit) must not beat [zabbix.X] / [server]."""
-        current_token_info.set(TokenInfo(id="t", name="t", token_hash="sha256:x", timezone="Asia/Tokyo", timezone_implicit=True))
-        mgr = self._Mgr(_config(zabbix_tz="Europe/London"), zabbix_zone="America/New_York")
-        self.assertEqual(timezones.zone_name(timezones.resolve_zone(mgr, "t")), "Europe/London")
-        mgr = self._Mgr(_config(server_tz="UTC"), zabbix_zone="America/New_York")
-        self.assertEqual(timezones.zone_name(timezones.resolve_zone(mgr, "t")), "UTC")
-        # ... but above what Zabbix reports and above the host zone
-        mgr = self._Mgr(_config(), zabbix_zone="America/New_York")
-        self.assertEqual(timezones.zone_name(timezones.resolve_zone(mgr, "t")), "Asia/Tokyo")
-        self.assertEqual(mgr.asked, 0)
-
-    def test_token_without_zone_inherits(self):
-        current_token_info.set(TokenInfo(id="t", name="t", token_hash="sha256:x"))
-        mgr = self._Mgr(_config(zabbix_tz="Europe/London"))
-        self.assertEqual(timezones.zone_name(timezones.resolve_zone(mgr, "t")), "Europe/London")
 
 
 class TestZabbixSideLookup(unittest.TestCase):
@@ -210,7 +184,7 @@ class TestZabbixSideLookup(unittest.TestCase):
 
     def _mgr(self, client, legacy=False):
         cfg = AppConfig(server=ServerConfig(), zabbix_servers={"t": ZabbixServerConfig(
-            name="t", url="http://localhost", api_token="x", legacy_auth=legacy,
+            name="t", url="http://localhost", api_token="" if legacy else "x", legacy_auth=legacy,
             username="u" if legacy else "", password="p" if legacy else "")})
         mgr = ClientManager(cfg)
         mgr._clients["t"] = client
@@ -352,9 +326,6 @@ class TestResponseShape(unittest.TestCase):
 class TestThroughRegisteredTools(unittest.TestCase):
     """The whole chain through ``MCPServer.call_tool``: the reporter's case."""
 
-    def tearDown(self):
-        current_token_info.set(None)
-
     def _server(self, cfg, rows=None):
         from mcp.server.mcpserver import MCPServer
         mgr = ClientManager(cfg)
@@ -388,14 +359,6 @@ class TestThroughRegisteredTools(unittest.TestCase):
         self.assertEqual(body[0]["clock"], str(T0))
         self.assertEqual(body[0]["clock_local"], "2026-04-01T09:00:00+01:00")
         self.assertNotIn("r_clock_local", body[0])
-
-    def test_token_zone_overrides_everything(self):
-        current_token_info.set(TokenInfo(id="t", name="t", token_hash="sha256:x", timezone="Asia/Tokyo"))
-        call = self._server(_config(server_tz="UTC", zabbix_tz="Europe/London"))
-        params, text = asyncio.run(call("problem_get", {"time_from": "2026-04-01 17:00:00"}))
-        self.assertEqual(params["time_from"], T0)
-        self.assertIn("Time zone: Asia/Tokyo; now ", text)
-        self.assertIn('"clock_local": "2026-04-01T17:00:00+09:00"', text)
 
     def test_zabbix_entry_zone(self):
         call = self._server(_config(zabbix_tz="America/New_York"))
@@ -438,30 +401,12 @@ class TestThroughRegisteredTools(unittest.TestCase):
 
 class TestConfigValidation(unittest.TestCase):
     def test_server_and_zabbix_timezone_are_validated(self):
-        from zabbix_mcp.config import _validate_timezone_setting
-        self.assertEqual(_validate_timezone_setting("", "x"), "")
-        self.assertEqual(_validate_timezone_setting(None, "x"), "")
-        self.assertEqual(_validate_timezone_setting("Europe/London", "x"), "Europe/London")
-        with self.assertRaises(ConfigError) as ctx:
-            _validate_timezone_setting("Mars/Olympus", "[zabbix.prod].timezone")
-        self.assertIn("[zabbix.prod].timezone", str(ctx.exception))
-        with self.assertRaises(ConfigError):
-            _validate_timezone_setting(123, "x")
-
-    def test_token_timezone_parsed_and_bad_value_ignored(self):
-        from zabbix_mcp.token_store import TokenStore
-        store = TokenStore()
-        with self.assertLogs("zabbix_mcp.token_store", level="WARNING") as logs:
-            store.load_from_config({
-                "good": {"name": "g", "token_hash": "sha256:" + "a" * 64, "timezone": "Europe/London"},
-                "bad": {"name": "b", "token_hash": "sha256:" + "b" * 64, "timezone": "Nowhere/Nothing"},
-                "none": {"name": "n", "token_hash": "sha256:" + "c" * 64},
-            })
-        by_id = {t.id: t for t in store.list_tokens()}
-        self.assertEqual(by_id["good"].timezone, "Europe/London")
-        self.assertIsNone(by_id["bad"].timezone)
-        self.assertIsNone(by_id["none"].timezone)
-        self.assertTrue(any("Nowhere/Nothing" in line for line in logs.output))
+        self.assertEqual(ServerConfig(timezone="").timezone, "")
+        self.assertEqual(ServerConfig(timezone="Europe/London").timezone, "Europe/London")
+        with self.assertRaises(ValidationError):
+            ServerConfig(timezone="Mars/Olympus")
+        with self.assertRaises(ValidationError):
+            ZabbixServerConfig(name="p", url="http://localhost", api_token="x", timezone="Mars/Olympus")
 
 
 if __name__ == "__main__":

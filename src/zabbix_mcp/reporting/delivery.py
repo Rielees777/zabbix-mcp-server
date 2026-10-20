@@ -78,7 +78,7 @@ def save_report(pdf_bytes: bytes, output_dir: str, filename: str) -> str:
     if not output_dir:
         raise DeliveryError(
             "Saving reports to disk is not enabled. The operator must set "
-            "[reporting].output_dir in config.toml."
+            "ZABBIX_MCP_REPORTING__OUTPUT_DIR."
         )
     base = Path(output_dir).expanduser().resolve()
     if not base.is_dir():
@@ -129,7 +129,7 @@ def send_report_email(
     if not getattr(email_config, "enabled", False):
         raise DeliveryError(
             "Emailing reports is not enabled. The operator must configure "
-            "[reporting.email] in config.toml."
+            "ZABBIX_MCP_REPORTING__EMAIL__*."
         )
     if not recipients:
         raise DeliveryError("No recipients given.")
@@ -168,7 +168,7 @@ def send_report_email(
             if email_config.use_starttls and not email_config.use_ssl:
                 smtp.starttls()
             if email_config.smtp_user:
-                smtp.login(email_config.smtp_user, email_config.smtp_password)
+                smtp.login(email_config.smtp_user, email_config.smtp_password.get_secret_value())
             smtp.send_message(msg)
     except DeliveryError:
         raise

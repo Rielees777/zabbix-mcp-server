@@ -34,31 +34,27 @@ logger = logging.getLogger("zabbix_mcp")
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="zabbix-mcp-server",
-        description="MCP server for the complete Zabbix API",
-    )
-    parser.add_argument(
-        "--config",
-        required=True,
-        help="Path to config.toml",
+        description="MCP server for the complete Zabbix API. Configured through "
+                    "ZABBIX_MCP_* environment variables (see .env.example).",
     )
     parser.add_argument(
         "--transport",
         choices=["stdio", "http", "sse"],
-        help="Override transport from config",
+        help="Override ZABBIX_MCP_SERVER__TRANSPORT",
     )
     parser.add_argument(
         "--host",
-        help="Override HTTP host from config",
+        help="Override ZABBIX_MCP_SERVER__HOST",
     )
     parser.add_argument(
         "--port",
         type=int,
-        help="Override HTTP port from config",
+        help="Override ZABBIX_MCP_SERVER__PORT",
     )
     parser.add_argument(
         "--check-config",
         action="store_true",
-        help="Validate config.toml and exit without starting the server",
+        help="Validate the environment settings and exit without starting the server",
     )
     parser.add_argument(
         "--version",
@@ -69,26 +65,14 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        config = load_config(args.config)
-        # Store config path for admin portal and config writer
-        object.__setattr__(config, "_config_path", str(Path(args.config).resolve()))
-    except FileNotFoundError:
-        print(f"ERROR: Config file not found: {args.config}", file=sys.stderr)
-        sys.exit(1)
-    except PermissionError:
-        print(
-            f"ERROR: Cannot read {args.config} (permission denied). "
-            f"Fix: sudo chown zabbix-mcp:zabbix-mcp {args.config}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        config = load_config()
     except ConfigError as e:
         print(f"Configuration error: {e}", file=sys.stderr)
         sys.exit(1)
 
     # --check-config: validate only, do not start the server.
     if args.check_config:
-        print(f"OK: {args.config} is valid")
+        print("OK: settings are valid")
         sys.exit(0)
 
     log_level = getattr(logging, config.server.log_level.upper(), logging.INFO)

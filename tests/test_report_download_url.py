@@ -23,7 +23,7 @@ import unittest
 
 from zabbix_mcp.config import AppConfig, ServerConfig
 from zabbix_mcp.server import _forwarded_base_from_headers, _report_download_base
-from zabbix_mcp.token_store import current_request_base
+from zabbix_mcp.auth import current_request_base
 
 
 def _hdrs(**kw):
@@ -114,7 +114,7 @@ class TestDownloadBase(unittest.TestCase):
         # Host resolve to loopback in that shape, so neither may be used.
         url, reason = _report_download_base(self._cfg(host="127.0.0.1", port=8080), "http")
         self.assertIsNone(url)
-        self.assertIn("public_url", reason)
+        self.assertIn("PUBLIC_URL", reason)
 
     def test_stdio_has_no_listener(self):
         current_request_base.set("http://127.0.0.1:8080")

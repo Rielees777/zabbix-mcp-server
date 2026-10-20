@@ -16,40 +16,33 @@ A skipped section stays skipped on every boot - presenting it as
 
 from __future__ import annotations
 
-import tempfile
+import os
 import unittest
-from pathlib import Path
+from unittest.mock import patch
 
 from zabbix_mcp.config import load_config
 from zabbix_mcp.client import ClientManager
 
 
-_CONFIG = """
-[server]
-transport = "http"
-auth_token = "test-token-0123456789abcdef0123456789abcdef"
+_ENV = {
+    "ZABBIX_MCP_SERVER__TRANSPORT": "http",
+    "ZABBIX_MCP_SERVER__AUTH_TOKEN": "test-token-0123456789abcdef0123456789abcdef",
+    "ZABBIX_MCP_ZABBIX_SERVERS__GOOD__URL": "https://zabbix.example.com",
+    "ZABBIX_MCP_ZABBIX_SERVERS__GOOD__API_TOKEN": "dummy",
+    "ZABBIX_MCP_ZABBIX_SERVERS__BROKEN__URL": "not-a-valid-url",
+    "ZABBIX_MCP_ZABBIX_SERVERS__BROKEN__API_TOKEN": "dummy",
+}
 
-[zabbix.good]
-url = "https://zabbix.example.com"
-api_token = "dummy"
 
-[zabbix.broken]
-url = "not-a-valid-url"
-api_token = "dummy"
-"""
+def _load(**overrides):
+    with patch.dict(os.environ, {**_ENV, **overrides}, clear=True):
+        return load_config()
 
 
 class TestSkippedServers(unittest.TestCase):
 
     def setUp(self):
-        self._tmp = tempfile.NamedTemporaryFile(
-            "w", suffix=".toml", delete=False)
-        self._tmp.write(_CONFIG)
-        self._tmp.close()
-        self.config = load_config(self._tmp.name)
-
-    def tearDown(self):
-        Path(self._tmp.name).unlink(missing_ok=True)
+        self.config = _load()
 
     def test_broken_section_skipped_with_reason(self):
         self.assertIn("good", self.config.zabbix_servers)
@@ -64,16 +57,9 @@ class TestSkippedServers(unittest.TestCase):
         self.assertIn("invalid URL", cm.skipped_servers["broken"])
 
     def test_all_valid_config_has_empty_skips(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as f:
-            f.write(_CONFIG.replace('url = "not-a-valid-url"',
-                                    'url = "https://other.example.com"'))
-            path = f.name
-        try:
-            cfg = load_config(path)
-            self.assertEqual(cfg.skipped_zabbix_servers, {})
-            self.assertEqual(ClientManager(cfg).skipped_servers, {})
-        finally:
-            Path(path).unlink(missing_ok=True)
+        cfg = _load(ZABBIX_MCP_ZABBIX_SERVERS__BROKEN__URL="https://other.example.com")
+        self.assertEqual(cfg.skipped_zabbix_servers, {})
+        self.assertEqual(ClientManager(cfg).skipped_servers, {})
 
 
 if __name__ == "__main__":

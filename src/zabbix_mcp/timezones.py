@@ -29,20 +29,16 @@ client sees only the epoch and, without a zone to anchor on, answers
 
 Resolution order, first hit wins:
 
-1. ``timezone`` on the calling MCP token (``[tokens.X]``, or the portal
-   user's own zone on an OAuth token)
-2. ``timezone`` on the Zabbix entry (``[zabbix.X]``)
-3. ``timezone`` in ``[server]``
-3b. the zone a browser reported at OAuth consent (implicit: below the
-   operator's pins, above what Zabbix says)
-4. the zone of the Zabbix user the API token belongs to
+1. ``timezone`` of the Zabbix entry (``ZABBIX_MCP_ZABBIX_SERVERS__<NAME>__TIMEZONE``)
+2. ``ZABBIX_MCP_SERVER__TIMEZONE``
+3. the zone of the Zabbix user the API token belongs to
    (``user.checkAuthentication`` -> ``timezone``, unless ``default``)
-5. the Zabbix frontend default (``settings.get`` -> ``default_timezone``,
+4. the Zabbix frontend default (``settings.get`` -> ``default_timezone``,
    unless ``system``)
-6. ``system``: the zone of the host this MCP server runs on - the best
+5. ``system``: the zone of the host this MCP server runs on - the best
    available stand-in for the Zabbix web server's own zone, which a
    remote caller cannot read
-7. UTC
+6. UTC
 
 Zone names are IANA keys (``Europe/London``); ``UTC`` and ``system``
 are accepted as spelled.
@@ -215,22 +211,11 @@ def resolve_zone(client_manager: Any, server_name: str) -> tzinfo:
     Does blocking I/O on the first call per server (Zabbix lookup, cached
     by the client manager), so call it from a worker thread.
     """
-    from zabbix_mcp.token_store import current_token_info
-
-    token = current_token_info.get()
-    token_zone = (getattr(token, "timezone", None) or "").strip() if token else ""
-    implicit = bool(getattr(token, "timezone_implicit", False)) if token else False
-    # A zone the operator wrote on the token wins; one merely reported by
-    # a browser at OAuth consent ranks below the operator's server pins.
-    name = token_zone if not implicit else ""
-    if not name:
-        cfg = getattr(client_manager, "config", None)
-        srv = cfg.zabbix_servers.get(server_name) if cfg else None
-        name = (getattr(srv, "timezone", "") or "").strip()
-        if not name and cfg is not None:
-            name = (getattr(cfg.server, "timezone", "") or "").strip()
-    if not name and implicit:
-        name = token_zone
+    cfg = getattr(client_manager, "config", None)
+    srv = cfg.zabbix_servers.get(server_name) if cfg else None
+    name = (getattr(srv, "timezone", "") or "").strip()
+    if not name and cfg is not None:
+        name = (getattr(cfg.server, "timezone", "") or "").strip()
     if not name:
         getter = getattr(client_manager, "get_zabbix_timezone", None)
         if getter is not None:

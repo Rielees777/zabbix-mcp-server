@@ -246,9 +246,9 @@ class ClientManager:
                 (" The URL is plain http://, so the password crosses the network "
                  "in clear text on every login.") if srv.url.startswith("http://") else "",
             )
-            api.login(user=srv.username, password=srv.password)
+            api.login(user=srv.username, password=srv.password.get_secret_value())
         else:
-            api.login(token=srv.api_token)
+            api.login(token=srv.api_token.get_secret_value())
 
         version = api.api_version()
         logger.info("Connected to '%s' - Zabbix %s", name, version)
@@ -578,7 +578,7 @@ class ClientManager:
         if srv.read_only:
             raise ReadOnlyError(
                 f"Server '{server}' is configured as read-only. "
-                f"Set read_only = false in config to allow write operations."
+                f"Set ZABBIX_MCP_ZABBIX_SERVERS__<NAME>__READ_ONLY=false to allow write operations."
             )
 
     def close(self) -> None:
@@ -587,7 +587,7 @@ class ClientManager:
             try:
                 # Token-based auth does not use sessions — logout is a no-op
                 # that would generate a warning. Only logout for session-based auth.
-                if not self.get_server_config(name).api_token:
+                if not self.get_server_config(name).api_token.get_secret_value():
                     client.logout()
                 logger.info("Disconnected from '%s'", name)
             except Exception:

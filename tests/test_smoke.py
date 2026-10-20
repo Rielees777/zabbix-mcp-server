@@ -23,6 +23,7 @@ import tempfile
 import unittest
 
 from zabbix_mcp import __version__
+from zabbix_mcp.auth import BearerTokenVerifier as _BearerTokenVerifier
 from zabbix_mcp.config import (
     AppConfig,
     ConfigError,
@@ -33,7 +34,6 @@ from zabbix_mcp.config import (
 from zabbix_mcp.client import ClientManager, RateLimitError, ReadOnlyError, _RateLimiter
 from zabbix_mcp.server import (
     _auto_wrap_arrays,
-    _BearerTokenVerifier,
     _build_zabbix_params,
     _normalize_enum_fields,
     _normalize_import_rules,
@@ -69,45 +69,92 @@ class TestVersion(unittest.TestCase):
 
 
 class TestConfig(unittest.TestCase):
+    def _load(self, env):
+        from unittest import mock
+        with mock.patch.dict(os.environ, env, clear=True):
+            return load_config()
+
     def test_load_minimal_config(self):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-            f.write('[zabbix.prod]\nurl = "http://z"\napi_token = "tok"\n')
-            f.flush()
-            cfg = load_config(f.name)
-        os.unlink(f.name)
+        cfg = self._load({
+            "ZABBIX_MCP_ZABBIX_SERVERS__PROD__URL": "http://z",
+            "ZABBIX_MCP_ZABBIX_SERVERS__PROD__API_TOKEN": "tok",
+        })
         self.assertEqual(cfg.default_server, "prod")
         self.assertEqual(cfg.zabbix_servers["prod"].url, "http://z")
         self.assertTrue(cfg.zabbix_servers["prod"].read_only)
 
-    def test_missing_file_raises(self):
+    def test_no_zabbix_server_raises(self):
         with self.assertRaises(ConfigError):
-            load_config("/nonexistent/path.toml")
+            self._load({"ZABBIX_MCP_SERVER__TRANSPORT": "stdio"})
 
-    def test_no_zabbix_section_raises(self):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-            f.write('[server]\ntransport = "stdio"\n')
-            f.flush()
-            with self.assertRaises(ConfigError):
-                load_config(f.name)
-        os.unlink(f.name)
+    def test_secrets_are_masked_but_readable(self):
+        cfg = self._load({
+            "ZABBIX_MCP_ZABBIX_SERVERS__PROD__URL": "http://z",
+            "ZABBIX_MCP_ZABBIX_SERVERS__PROD__API_TOKEN": "secret123",
+            "ZABBIX_MCP_SERVER__AUTH_TOKEN": "bearer456",
+        })
+        srv = cfg.zabbix_servers["prod"]
+        self.assertEqual(srv.api_token.get_secret_value(), "secret123")
+        self.assertEqual(cfg.server.auth_token.get_secret_value(), "bearer456")
+        self.assertNotIn("secret123", repr(cfg))
+        self.assertNotIn("bearer456", repr(cfg))
 
-    def test_env_var_resolution(self):
-        os.environ["_TEST_TOKEN"] = "secret123"
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-            f.write('[zabbix.prod]\nurl = "http://z"\napi_token = "${_TEST_TOKEN}"\n')
-            f.flush()
-            cfg = load_config(f.name)
-        os.unlink(f.name)
-        del os.environ["_TEST_TOKEN"]
-        self.assertEqual(cfg.zabbix_servers["prod"].api_token, "secret123")
+    def test_missing_api_token_skips_the_server(self):
+        cfg = self._load({
+            "ZABBIX_MCP_ZABBIX_SERVERS__GOOD__URL": "http://z",
+            "ZABBIX_MCP_ZABBIX_SERVERS__GOOD__API_TOKEN": "t",
+            "ZABBIX_MCP_ZABBIX_SERVERS__BROKEN__URL": "http://y",
+        })
+        self.assertEqual(list(cfg.zabbix_servers), ["good"])
+        self.assertIn("api_token", cfg.skipped_zabbix_servers["broken"])
 
-    def test_missing_env_var_raises(self):
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
-            f.write('[zabbix.prod]\nurl = "http://z"\napi_token = "${_NONEXISTENT_VAR}"\n')
-            f.flush()
-            with self.assertRaises(ConfigError):
-                load_config(f.name)
-        os.unlink(f.name)
+    def test_all_servers_invalid_raises(self):
+        with self.assertRaises(ConfigError):
+            self._load({"ZABBIX_MCP_ZABBIX_SERVERS__BROKEN__URL": "not-a-url"})
+
+    def test_lists_accept_csv_and_json(self):
+        cfg = self._load({
+            "ZABBIX_MCP_ZABBIX_SERVERS__PROD__URL": "http://z",
+            "ZABBIX_MCP_ZABBIX_SERVERS__PROD__API_TOKEN": "t",
+            "ZABBIX_MCP_SERVER__ALLOWED_HOSTS": "10.0.0.0/24, 127.0.0.1",
+            "ZABBIX_MCP_SERVER__CORS_ORIGINS": '["https://a.example", "https://b.example"]',
+            "ZABBIX_MCP_SERVER__TOOLS": "alerts",
+        })
+        self.assertEqual(cfg.server.allowed_hosts, ["10.0.0.0/24", "127.0.0.1"])
+        self.assertEqual(cfg.server.cors_origins, ["https://a.example", "https://b.example"])
+        self.assertIn("action", cfg.server.tools)  # group expanded
+
+    def test_secrets_dir_files_are_read_and_env_wins(self):
+        # Vault Agent / CSI style: one file per setting, named like the variable.
+        with tempfile.TemporaryDirectory() as d:
+            for name, value in {
+                "zabbix_mcp_zabbix_servers__prod__url": "http://from-file",
+                "zabbix_mcp_zabbix_servers__prod__api_token": "file-token\n",
+                "zabbix_mcp_server__auth_token": "file-bearer",
+            }.items():
+                with open(os.path.join(d, name), "w") as f:
+                    f.write(value)
+            cfg = self._load({
+                "ZABBIX_MCP_SECRETS_DIR": d,
+                "ZABBIX_MCP_SERVER__AUTH_TOKEN": "env-bearer",
+            })
+        srv = cfg.zabbix_servers["prod"]
+        self.assertEqual(srv.url, "http://from-file")
+        self.assertEqual(srv.api_token.get_secret_value(), "file-token")
+        self.assertEqual(cfg.server.auth_token.get_secret_value(), "env-bearer")
+
+    def test_invalid_settings_are_reported_not_raised_raw(self):
+        env = {
+            "ZABBIX_MCP_ZABBIX_SERVERS__PROD__URL": "http://z",
+            "ZABBIX_MCP_ZABBIX_SERVERS__PROD__API_TOKEN": "t",
+        }
+        for bad in ({"ZABBIX_MCP_SERVER__PORT": "70000"},
+                    {"ZABBIX_MCP_SERVER__TRANSPORT": "carrier-pigeon"},
+                    {"ZABBIX_MCP_SERVER__TLS_CERT_FILE": "/c.pem"},
+                    {"ZABBIX_MCP_SERVER__PUBLIC_URL": "https://0.0.0.0"},
+                    {"ZABBIX_MCP_SERVER__ALLOWED_ORIGINS": "example.com"}):
+            with self.subTest(bad=bad), self.assertRaises(ConfigError):
+                self._load({**env, **bad})
 
     def test_defaults(self):
         cfg = _make_config()
@@ -299,32 +346,11 @@ class TestActionConfirmRecheck(unittest.TestCase):
 
         cfg, mgr, prepare, confirm = self._tools()
         prepared = json.loads(asyncio.run(prepare(action="host.update", params={"hostid": "1"})))
-        ro = replace(cfg.zabbix_servers["test"], read_only=True)
-        mgr._config = replace(cfg, zabbix_servers={"test": ro})
+        ro = cfg.zabbix_servers["test"].model_copy(update={"read_only": True})
+        mgr._config = cfg.model_copy(update={"zabbix_servers": {"test": ro}})
         with patch.object(mgr, "call", return_value={"hostids": ["1"]}) as call:
             with self.assertRaises(ToolError) as ctx:
                 asyncio.run(confirm(confirmation_token=prepared["confirmation_token"]))
-        self.assertIn("read-only", str(ctx.exception))
-        call.assert_not_called()
-
-    def test_token_turned_read_only_after_prepare(self):
-        import json
-        from unittest.mock import patch
-        from mcp.server.mcpserver.exceptions import ToolError
-        from zabbix_mcp.token_store import TokenInfo, current_token_info
-
-        cfg, mgr, prepare, confirm = self._tools()
-        rw = TokenInfo(id="ops", name="ops", token_hash="sha256:x", read_only=False)
-        ro = TokenInfo(id="ops", name="ops", token_hash="sha256:x", read_only=True)
-        outer = current_token_info.set(rw)
-        try:
-            prepared = json.loads(asyncio.run(prepare(action="host.update", params={"hostid": "1"})))
-            current_token_info.set(ro)
-            with patch.object(mgr, "call", return_value={"hostids": ["1"]}) as call:
-                with self.assertRaises(ToolError) as ctx:
-                    asyncio.run(confirm(confirmation_token=prepared["confirmation_token"]))
-        finally:
-            current_token_info.reset(outer)
         self.assertIn("read-only", str(ctx.exception))
         call.assert_not_called()
 
@@ -1667,251 +1693,6 @@ class TestProblemActiveExtension(unittest.TestCase):
         first_call_args = cm.call.call_args_list[0]
         self.assertEqual(first_call_args.args[1], "problem.get")
         self.assertEqual(first_call_args.args[2]["severities"], [2, 3, 4, 5])
-
-
-class TestToolsListTokenFilter(unittest.TestCase):
-    """tools/list filtering against per-token scopes (#38)."""
-
-    def setUp(self):
-        from zabbix_mcp import server as srv
-        srv._ensure_write_tools_set()
-        # Use simple namespace objects masquerading as MCPTool entries
-        from types import SimpleNamespace as NS
-        self.tools = [
-            NS(name="host_get"),
-            NS(name="host_create"),
-            NS(name="host_update"),
-            NS(name="host_delete"),
-            NS(name="hostgroup_get"),
-            NS(name="problem_get"),
-            NS(name="problem_active_get"),
-            NS(name="user_get"),
-            NS(name="user_create"),
-            NS(name="action_create"),
-            NS(name="action_prepare"),
-            NS(name="zabbix_raw_api_call"),
-            NS(name="graph_render"),
-            NS(name="health_check"),
-            NS(name="capacity_forecast"),
-        ]
-        self.token_cls = NS
-
-    def _filter_with(self, scopes, read_only=False):
-        from zabbix_mcp.server import _filter_tools_by_token
-        from zabbix_mcp.token_store import current_token_info
-        token = self.token_cls(scopes=scopes, read_only=read_only)
-        tok_token = current_token_info.set(token)
-        try:
-            return [t.name for t in _filter_tools_by_token(self.tools)]
-        finally:
-            current_token_info.reset(tok_token)
-
-    def test_no_token_returns_full_list(self):
-        from zabbix_mcp.server import _filter_tools_by_token
-        # No token in context (e.g. stdio mode) -> no filtering
-        names = [t.name for t in _filter_tools_by_token(self.tools)]
-        self.assertEqual(names, [t.name for t in self.tools])
-
-    def test_wildcard_scope_returns_full_list(self):
-        names = self._filter_with(["*"])
-        self.assertEqual(names, [t.name for t in self.tools])
-
-    def test_empty_scope_returns_full_list(self):
-        # Treat empty/None scopes the same as ["*"] for backwards compat.
-        names = self._filter_with([])
-        self.assertEqual(names, [t.name for t in self.tools])
-
-    def test_read_only_token_drops_write_tools(self):
-        # Read-only with wildcard scopes: keep all read tools, drop writes.
-        names = self._filter_with(["*"], read_only=True)
-        self.assertIn("host_get", names)
-        self.assertIn("problem_get", names)
-        self.assertIn("graph_render", names)
-        self.assertNotIn("host_create", names)
-        self.assertNotIn("host_update", names)
-        self.assertNotIn("host_delete", names)
-        self.assertNotIn("user_create", names)
-        self.assertNotIn("action_prepare", names)
-        self.assertNotIn("zabbix_raw_api_call", names)
-
-    def test_monitoring_scope_keeps_only_monitoring(self):
-        names = self._filter_with(["monitoring"])
-        # monitoring group includes host, hostgroup, problem -> these in
-        self.assertIn("host_get", names)
-        self.assertIn("host_create", names)  # not read-only token, so writes survive
-        self.assertIn("hostgroup_get", names)
-        self.assertIn("problem_get", names)
-        # user/action/extensions are out of scope
-        self.assertNotIn("user_get", names)
-        self.assertNotIn("user_create", names)
-        self.assertNotIn("action_create", names)
-        self.assertNotIn("graph_render", names)
-
-    def test_extensions_scope_brings_in_extension_tools(self):
-        names = self._filter_with(["extensions"])
-        self.assertIn("graph_render", names)
-        self.assertIn("health_check", names)
-        self.assertIn("capacity_forecast", names)
-        self.assertNotIn("host_get", names)
-
-    def test_individual_extension_tool_in_scope(self):
-        # If user grants only graph_render explicitly, only that extension
-        # tool comes back, the rest of "extensions" group stays hidden.
-        names = self._filter_with(["graph_render"])
-        self.assertIn("graph_render", names)
-        self.assertNotIn("health_check", names)
-        self.assertNotIn("capacity_forecast", names)
-
-    def test_monitoring_plus_read_only_keeps_only_reads(self):
-        names = self._filter_with(["monitoring"], read_only=True)
-        self.assertIn("host_get", names)
-        self.assertIn("hostgroup_get", names)
-        self.assertIn("problem_get", names)
-        self.assertIn("problem_active_get", names)
-        # writes within monitoring scope are still dropped
-        self.assertNotIn("host_create", names)
-        self.assertNotIn("host_update", names)
-        self.assertNotIn("host_delete", names)
-
-
-class TestOAuthProvider(unittest.IsolatedAsyncioTestCase):
-    """Unit tests for the embedded OAuth 2.1 authorization-server provider (#36)."""
-
-    def setUp(self):
-        from zabbix_mcp.oauth_provider import ZmcpOAuthProvider
-        self.provider = ZmcpOAuthProvider(
-            public_url="https://mcp.example.com",
-            token_store=None,
-            login_path="/oauth/login",
-        )
-
-
-    @staticmethod
-    def _client_info(**kw):
-        """Build OAuthClientInformationFull the way the SDK 2.0 DCR
-        handler does: client_id minted by the handler before the model
-        reaches provider.register_client (client_id is now a required
-        model field)."""
-        from uuid import uuid4
-        from mcp.shared.auth import OAuthClientInformationFull
-        kw.setdefault("client_id", str(uuid4()))
-        return OAuthClientInformationFull(**kw)
-
-    async def test_register_preserves_client_id(self):
-        # SDK 2.0 contract: the handler mints client_id; register_client
-        # must keep it verbatim and index the client under it.
-        ci = self._client_info(
-            redirect_uris=["http://localhost:8765/callback"],
-            client_name="test-client",
-            token_endpoint_auth_method="none",
-        )
-        minted = ci.client_id
-        await self.provider.register_client(ci)
-        self.assertEqual(ci.client_id, minted)
-        self.assertIsNone(ci.client_secret)  # public client (PKCE)
-        self.assertIn(minted, self.provider._clients)
-
-    async def test_register_confidential_client_gets_secret(self):
-        ci = self._client_info(
-            redirect_uris=["https://app.example.com/cb"],
-            client_name="confidential",
-            token_endpoint_auth_method="client_secret_post",
-        )
-        await self.provider.register_client(ci)
-        self.assertTrue(ci.client_secret)
-
-    async def test_authorize_redirects_to_login(self):
-        from mcp.server.auth.provider import AuthorizationParams
-        ci = self._client_info(
-            redirect_uris=["http://localhost:8765/cb"],
-            client_name="x",
-            token_endpoint_auth_method="none",
-        )
-        await self.provider.register_client(ci)
-        params = AuthorizationParams(
-            state="s",
-            scopes=["monitoring"],
-            code_challenge="abc",
-            redirect_uri="http://localhost:8765/cb",
-            redirect_uri_provided_explicitly=True,
-            resource="https://mcp.example.com",
-        )
-        url = await self.provider.authorize(ci, params)
-        self.assertTrue(url.startswith("https://mcp.example.com/oauth/login?request_id="))
-        # The pending request should be retrievable for the login view
-        request_id = url.split("request_id=", 1)[1]
-        pending = self.provider._pending.get(request_id)
-        self.assertIsNotNone(pending)
-
-    async def test_complete_pending_mints_code_redirect(self):
-        from mcp.server.auth.provider import AuthorizationParams
-        ci = self._client_info(
-            redirect_uris=["http://localhost:8765/cb"],
-            client_name="x",
-            token_endpoint_auth_method="none",
-        )
-        await self.provider.register_client(ci)
-        params = AuthorizationParams(
-            state="state-xyz",
-            scopes=["monitoring"],
-            code_challenge="abc",
-            redirect_uri="http://localhost:8765/cb",
-            redirect_uri_provided_explicitly=True,
-            resource="https://mcp.example.com",
-        )
-        url = await self.provider.authorize(ci, params)
-        request_id = url.split("request_id=", 1)[1]
-        redirect = self.provider.complete_pending(request_id, ["monitoring"], "tomas")
-        self.assertIsNotNone(redirect)
-        self.assertIn("http://localhost:8765/cb?", redirect)
-        self.assertIn("state=state-xyz", redirect)
-        self.assertIn("code=", redirect)
-        # RFC 9207: the authorization response must identify the issuer
-        # so the client can detect an AS mix-up before redeeming.
-        self.assertIn("iss=https%3A%2F%2Fmcp.example.com", redirect)
-
-    async def test_audience_binding_rejects_other_deployment(self):
-        # An access token issued for a different MCP server URL must not
-        # validate against this one. Synthesize the AccessToken directly
-        # (bypassing the code/refresh flow) for a focused test.
-        from mcp.server.auth.provider import AccessToken
-        bogus = AccessToken(
-            token="bogus-token-for-test",
-            client_id="any",
-            scopes=["*"],
-            expires_at=None,
-            resource="https://mcp.attacker.com",
-        )
-        self.provider._access_tokens["bogus-token-for-test"] = bogus
-        loaded = await self.provider.load_access_token("bogus-token-for-test")
-        self.assertIsNone(loaded)
-
-    async def test_legacy_bearer_falls_through_when_token_store_present(self):
-        # When the OAuth-issued token cache is empty the provider falls
-        # through to TokenStore.verify so existing [tokens.X] continue
-        # working. We stub a TokenStore with a verify() that returns a
-        # synthesized TokenInfo.
-        from unittest.mock import MagicMock
-        from zabbix_mcp.token_store import TokenInfo
-        info = TokenInfo(
-            id="legacy-id",
-            name="legacy-name",
-            token_hash="",
-            token_prefix="",
-            scopes=["monitoring"],
-            read_only=True,
-        )
-        ts = MagicMock()
-        ts.verify.return_value = info
-        from zabbix_mcp.oauth_provider import ZmcpOAuthProvider
-        p = ZmcpOAuthProvider(
-            public_url="https://mcp.example.com",
-            token_store=ts,
-        )
-        bridged = await p.load_access_token("zmcp_legacy_token_value")
-        self.assertIsNotNone(bridged)
-        self.assertEqual(list(bridged.scopes), ["monitoring"])
-        self.assertEqual(bridged.client_id, "legacy:legacy-id")
 
 
 class TestSecurityPathTraversal(unittest.TestCase):
