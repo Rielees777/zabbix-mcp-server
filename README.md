@@ -8,7 +8,7 @@ MCP server that gives AI assistants and your own models access to the Zabbix API
 
 <p align="center">
   <b>Overview:</b> <a href="#what-is-this">What is this?</a> · <a href="#features">Features</a><br>
-  <b>Run:</b> <a href="#quick-start">Quick Start</a> · <a href="#configuration">Configuration</a> · <a href="#kubernetes-helm-and-vault">Kubernetes &amp; Vault</a> · <a href="#docker">Docker</a> · <a href="#public-url-and-reverse-proxy-deployments">Public URL</a> · <a href="#tls--https">TLS</a><br>
+  <b>Run:</b> <a href="#quick-start">Quick Start</a> · <a href="#configuration">Configuration</a> · <a href="#kubernetes-helm-and-vault">Kubernetes &amp; Vault</a> · <a href="#public-url-and-reverse-proxy-deployments">Public URL</a> · <a href="#tls--https">TLS</a><br>
   <b>Use:</b> <a href="#connecting-ai-clients">AI Clients</a> · <a href="#available-tools">Tools</a> · <a href="#common-parameters-get-methods">Parameters</a> · <a href="#time-zones">Time zones</a> · <a href="#pdf-reports-beta">PDF Reports</a> · <a href="#token-budget">Token Budget</a><br>
   <b>More:</b> <a href="#zabbix-compatibility">Compatibility</a> · <a href="#development">Development</a>
 </p>
@@ -225,17 +225,6 @@ Non-secret settings go into `env:` of `helm/values-prod.yaml` (it already sets `
 If your cluster mounts Vault secrets as files instead (Vault Agent Injector, CSI), point `ZABBIX_MCP_SECRETS_DIR` at the mount (default `/vault/secrets`): every file is read as the variable of the same name in lower case, e.g. `zabbix_mcp_zabbix_servers__prod__api_token`; trailing newlines are stripped, dot-files (the `..data` bookkeeping of mounted Secrets) are ignored, and real environment variables win over files.
 
 Health: `GET /health` answers `{"status":"ok"}` without authentication.
-
-### Docker
-
-```bash
-cp .env.example .env        # fill in the Zabbix URL + API token
-docker compose up -d --build
-docker compose logs -f
-curl http://127.0.0.1:8080/health
-```
-
-The compose file passes the `.env` file straight into the container; the container runs the HTTP transport on `0.0.0.0:8080` and logs to stdout.
 
 ## Public URL and reverse-proxy deployments
 
@@ -634,7 +623,7 @@ The `report_generate` tool produces professional PDF reports from Zabbix data. R
 
 **Enabling reports:**
 
-PDF generation requires two extra Python packages. Install the optional `reporting` extra (the Docker image already includes it):
+PDF generation requires two extra Python packages. Install the optional `reporting` extra (the pipeline image does not include it, see above):
 
 ```bash
 # zabbix-mcp-server is not published on PyPI - install from a checkout
