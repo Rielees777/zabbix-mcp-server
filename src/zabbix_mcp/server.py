@@ -56,6 +56,7 @@ from zabbix_utils.exceptions import APIRequestError
 from zabbix_mcp.client import ClientManager, RateLimitError, ReadOnlyError
 from zabbix_mcp.auth import BearerTokenVerifier, caller_fingerprint
 from zabbix_mcp.config import AppConfig
+from zabbix_mcp.write_policy import WritePolicy, write_tool_names
 from zabbix_mcp.timezones import EPOCH_FIELDS, add_local_times, now_local, resolve_zone, zone_name
 
 logger = logging.getLogger("zabbix_mcp.server")
@@ -1811,8 +1812,12 @@ def _register_tools(
     validate_get: bool = True,
     config: AppConfig | None = None,
     transport: str = "stdio",
+    write_policy: WritePolicy | None = None,
 ) -> int:
     """Register Zabbix API methods as MCP tools. Returns tool count.
+
+    Tools named by *write_policy* (the blocked-tools file) are not registered,
+    and the same operations are refused by method name in the raw / prepared calls.
 
     When *tools_filter* is ``None`` (default), all tools are registered.
     Otherwise only tools whose prefix matches an entry in the list are
@@ -1833,6 +1838,8 @@ def _register_tools(
         if disabled_tools is not None:
             if prefix in disabled_tools:
                 continue
+        if write_policy is not None and write_policy.blocks(method_def.tool_name):
+            continue
         handler = _make_tool_handler(
             method_def, client_manager, server_names,
             allowed_import_dirs=allowed_import_dirs,
@@ -1866,7 +1873,22 @@ def _register_tools(
             return False
         if disabled_tools is not None and (tool_name in disabled_tools or "extensions" in disabled_tools):
             return False
+        if write_policy is not None and write_policy.blocks(tool_name):
+            return False
         return True
+
+    def _refuse_restricted(method: str) -> None:
+        """Methods reachable by name (raw call, prepared actions) obey the same rules as the tools."""
+        if is_blocked_api_method(method):
+            raise ToolError(
+                f"'{method}' is not available: this server does not give access to "
+                f"Zabbix users, user groups, user directories, roles, API tokens or MFA methods."
+            )
+        if write_policy is not None and write_policy.blocks_api_method(method):
+            raise ToolError(
+                f"'{method}' is restricted: its tool is listed in the operator's blocked write-tools "
+                f"file ({write_policy.source}). Remove it from that file to allow it."
+            )
 
     # Generic raw API call tool
     server_desc = (
@@ -1900,11 +1922,7 @@ def _register_tools(
         if _raw_err:
             raise ToolError(_raw_err)
 
-        if is_blocked_api_method(method):
-            raise ToolError(
-                f"'{method}' is not available: this server does not give access to "
-                f"Zabbix users, user groups, user directories, roles, API tokens or MFA methods."
-            )
+        _refuse_restricted(method)
 
         server_name = server or _default_server_for_caller(client_manager)
         if not server_name:
@@ -2637,6 +2655,7 @@ def _register_tools(
         """Prepare a write action for review before execution. Returns a preview
         of what will happen and a confirmation token. Use action_confirm with the
         token to actually execute it. Tokens expire after 5 minutes."""
+        _refuse_restricted(action)
         srv = client_manager.resolve_server(server or _default_server_for_caller(client_manager))
 
         try:
@@ -2722,8 +2741,10 @@ def _register_tools(
         if action_data["expires"] < time.time():
             raise ToolError("Confirmation token has expired. Prepare the action again.")
 
-        # Check the server's read_only flag again here, not only in
-        # action_prepare, and this is the call that writes.
+        # Check the restrictions and the server's read_only flag again here,
+        # not only in action_prepare: this is the call that writes, and the
+        # blocked-tools file may have been edited and the server restarted in between.
+        _refuse_restricted(action_data["action"])
         try:
             client_manager.check_write(action_data["server"])
         except ReadOnlyError as e:
@@ -2857,6 +2878,7 @@ def run_server(
     global _RAW_JSON_ALLOWED
     _RAW_JSON_ALLOWED = config.server.allow_raw_json
 
+    write_policy = getattr(config, "_write_policy", None)
     client_manager = ClientManager(config)
     client_manager.warm_versions()
 
@@ -3126,7 +3148,19 @@ def run_server(
         # Effective transport, not config.server.transport - the CLI can
         # override it, and stdio has no HTTP listener to link to.
         transport=transport,
+        write_policy=write_policy,
     )
+    if write_policy is not None:
+        allowed = write_policy.allowed_write_tools()
+        logger.info(
+            "Write restrictions (%s): %d patterns, %d of %d write tools blocked",
+            write_policy.source, len(write_policy.patterns),
+            len(write_tool_names()) - len(allowed), len(write_tool_names()),
+        )
+        if allowed:
+            logger.warning("Write tools ENABLED (not in the blocked list): %s", ", ".join(allowed))
+        else:
+            logger.info("No write tool is enabled: the server cannot change data in Zabbix")
     if config.server.tools or config.server.disabled_tools:
         parts = []
         if config.server.tools:

@@ -239,6 +239,9 @@ class ServerConfig(_Frozen):
     allow_raw_json: bool = False
     # Default zone for every Zabbix entry that has none of its own.
     timezone: str = ""
+    # File listing the tools that may change data in Zabbix and are blocked
+    # (see zabbix_mcp.write_policy). None = the list built into the package.
+    blocked_tools_file: str | None = None
 
     @field_validator(
         "tools", "disabled_tools", "cors_origins", "allowed_import_dirs",
@@ -454,6 +457,8 @@ class AppConfig(BaseSettings):
     _runtime_port: int | None = PrivateAttr(default=None)
     _task_store: Any = PrivateAttr(default=None)
     _report_store: Any = PrivateAttr(default=None)
+    # The parsed blocked-tools file; None (e.g. in tests) = nothing is restricted.
+    _write_policy: Any = PrivateAttr(default=None)
 
     @classmethod
     def settings_customise_sources(cls, settings_cls, init_settings, env_settings,
@@ -611,6 +616,11 @@ def load_config() -> AppConfig:
         config = AppConfig()
     except ValidationError as exc:
         raise ConfigError(_format_error(exc)) from exc
+    from zabbix_mcp.write_policy import PolicyError, WritePolicy
+    try:
+        config._write_policy = WritePolicy.load(config.server.blocked_tools_file or None)
+    except PolicyError as exc:
+        raise ConfigError(str(exc)) from exc
     if not config.zabbix_servers:
         if config.skipped_zabbix_servers:
             raise ConfigError(

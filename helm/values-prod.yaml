@@ -24,7 +24,10 @@ readOnlyRootFilesystem: "false"
 #   ZABBIX_MCP_SERVER__AUTH_TOKEN               - bearer-токен для MCP-клиентов
 #   ZABBIX_MCP_SERVER__AUTH_TOKEN_EXPIRES_AT    - (необязательно) срок действия токена, ISO 8601
 # Порт и режим сервера (transport=http, host=0.0.0.0, port=30030) заданы в ci-cd-files/Dockerfile.
-# Режим записи в Zabbix выключен по умолчанию (READ_ONLY=true); включать только в Vault осознанно.
+# Инструменты, меняющие данные в Zabbix, заблокированы списком src/zabbix_mcp/blocked_write_tools.txt
+# (по умолчанию заблокированы все 138). Чтобы разрешить инструмент, удалите его строку и пересоберите образ,
+# либо подмонтируйте свой файл и укажите ZABBIX_MCP_SERVER__BLOCKED_TOOLS_FILE=<путь>.
+# Запись на конкретный Zabbix дополнительно требует READ_ONLY=false (по умолчанию true).
 env:
   # Внешний адрес, который сервер сообщает клиентам. Должен совпадать с host в ingress ниже.
   ZABBIX_MCP_SERVER__PUBLIC_URL: "https://zbx-mcp.sovcombank.group"

@@ -182,7 +182,11 @@ class TestDualGenerationProtocol(unittest.TestCase):
         }, {"Mcp-Session-Id": session_id, "MCP-Protocol-Version": "2025-11-25"})
         self.assertEqual(status, 200)
         tools = resp["result"]["tools"]
-        self.assertGreater(len(tools), 200)
+        # The shipped blocked-write-tools list hides every tool that changes data.
+        self.assertGreater(len(tools), 50)
+        names = {t["name"] for t in tools}
+        self.assertIn("host_get", names)
+        self.assertFalse({"host_create", "host_delete", "zabbix_raw_api_call", "action_prepare"} & names)
         self.__class__._legacy_tool_count = len(tools)
 
     # -- stateless generation ------------------------------------------------
@@ -201,7 +205,7 @@ class TestDualGenerationProtocol(unittest.TestCase):
         }, {"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list"})
         self.assertEqual(status, 200)
         result = resp["result"]
-        self.assertGreater(len(result["tools"]), 200)
+        self.assertGreater(len(result["tools"]), 50)
         # Spec: CacheableResult on tools/list, private to the authorization.
         self.assertEqual(result.get("cacheScope"), "private")
         # tools_list_cache_ttl default is 300 s -> 300000 ms.

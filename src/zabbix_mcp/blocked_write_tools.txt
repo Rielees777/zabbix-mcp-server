@@ -1,0 +1,244 @@
+# Tools that can change data in Zabbix and are therefore BLOCKED.
+#
+# One tool name per line; "#" starts a comment; wildcards work ("*_delete").
+# A blocked tool is not offered to the model at all, and the same operation is
+# refused when it is asked for by API method name through zabbix_raw_api_call
+# or action_prepare / action_confirm ("host.delete" is blocked while
+# "host_delete" is listed here).
+#
+# To allow a tool, DELETE ITS LINE. It can then write only to Zabbix servers
+# that are not READ_ONLY (ZABBIX_MCP_ZABBIX_SERVERS__<NAME>__READ_ONLY=false).
+# Keep zabbix_raw_api_call and action_prepare/action_confirm listed unless you
+# really mean to let the model send arbitrary methods: they are checked against
+# this list per method, but a method that has no dedicated tool is not covered.
+#
+# Use another file (for example a ConfigMap mount) with
+#   ZABBIX_MCP_SERVER__BLOCKED_TOOLS_FILE=/path/to/file
+# Print every write tool with:  python -m zabbix_mcp.write_policy
+
+
+# extensions
+action_confirm
+action_prepare
+zabbix_raw_api_call
+
+# action
+action_create
+action_delete
+action_update
+
+# authentication
+authentication_update
+
+# autoregistration
+autoregistration_update
+
+# configuration
+configuration_import
+
+# connector
+connector_create
+connector_delete
+connector_update
+
+# correlation
+correlation_create
+correlation_delete
+correlation_update
+
+# dashboard
+dashboard_create
+dashboard_delete
+dashboard_update
+
+# discoveryrule
+discoveryrule_create
+discoveryrule_delete
+discoveryrule_update
+
+# discoveryruleprototype
+discoveryruleprototype_create
+discoveryruleprototype_delete
+discoveryruleprototype_update
+
+# drule
+drule_create
+drule_delete
+drule_update
+
+# event
+event_acknowledge
+
+# graph
+graph_create
+graph_delete
+graph_update
+
+# graphprototype
+graphprototype_create
+graphprototype_delete
+graphprototype_update
+
+# history
+history_clear
+history_push
+
+# host
+host_create
+host_delete
+host_massadd
+host_massremove
+host_massupdate
+host_update
+
+# hostgroup
+hostgroup_create
+hostgroup_delete
+hostgroup_massadd
+hostgroup_massremove
+hostgroup_massupdate
+hostgroup_propagate
+hostgroup_update
+
+# hostinterface
+hostinterface_create
+hostinterface_delete
+hostinterface_massadd
+hostinterface_massremove
+hostinterface_replacehostinterfaces
+hostinterface_update
+
+# hostprototype
+hostprototype_create
+hostprototype_delete
+hostprototype_update
+
+# housekeeping
+housekeeping_update
+
+# httptest
+httptest_create
+httptest_delete
+httptest_update
+
+# iconmap
+iconmap_create
+iconmap_delete
+iconmap_update
+
+# image
+image_create
+image_delete
+image_update
+
+# item
+item_create
+item_delete
+item_update
+
+# itemprototype
+itemprototype_create
+itemprototype_delete
+itemprototype_update
+
+# maintenance
+maintenance_create
+maintenance_delete
+maintenance_update
+
+# map
+map_create
+map_delete
+map_update
+
+# mediatype
+mediatype_create
+mediatype_delete
+mediatype_update
+
+# module
+module_create
+module_delete
+module_update
+
+# proxy
+proxy_create
+proxy_delete
+proxy_update
+
+# proxygroup
+proxygroup_create
+proxygroup_delete
+proxygroup_update
+
+# regexp
+regexp_create
+regexp_delete
+regexp_update
+
+# report
+report_create
+report_delete
+report_update
+
+# script
+script_create
+script_delete
+script_execute
+script_update
+
+# settings
+settings_update
+
+# sla
+sla_create
+sla_delete
+sla_update
+
+# task
+task_create
+
+# template
+template_create
+template_delete
+template_massadd
+template_massremove
+template_massupdate
+template_update
+
+# templatedashboard
+templatedashboard_create
+templatedashboard_delete
+templatedashboard_update
+
+# templategroup
+templategroup_create
+templategroup_delete
+templategroup_massadd
+templategroup_massremove
+templategroup_massupdate
+templategroup_propagate
+templategroup_update
+
+# trigger
+trigger_create
+trigger_delete
+trigger_update
+
+# triggerprototype
+triggerprototype_create
+triggerprototype_delete
+triggerprototype_update
+
+# usermacro
+usermacro_create
+usermacro_createglobal
+usermacro_delete
+usermacro_deleteglobal
+usermacro_update
+usermacro_updateglobal
+
+# valuemap
+valuemap_create
+valuemap_delete
+valuemap_update

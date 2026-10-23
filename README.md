@@ -55,7 +55,7 @@ The server runs as a standalone HTTP service. AI clients connect to it over the 
 - **Tool filtering** - Limit exposed tools by category (`monitoring`, `alerts`, `extensions`, etc.) or individual API prefix to reduce the tool catalog size and stay under LLM context limits (see [Token Budget](#token-budget) below)
 - **Compact output mode** - Get methods return only key fields by default, reducing response token usage; LLM can request `extend` for full details
 - **LLM-friendly normalizations** - Symbolic enum names, auto-fill defaults, preprocessing cleanup, timestamp conversion with local-time rendering (`<field>_local` siblings and a per-call zone note, see [Time zones](#time-zones))
-- **Read-only mode** - Per-server write protection to prevent accidental changes (on by default)
+- **Write restrictions in a file** - every tool that can change data in Zabbix is listed in [`blocked_write_tools.txt`](src/zabbix_mcp/blocked_write_tools.txt) and blocked by default; delete a line to allow that tool (see [Write restrictions](#write-restrictions)). Per-server `READ_ONLY` stays as a second gate
 - **Rate limiting** - Per-client call budget (300/min default) to protect Zabbix from flooding
 - **Auto-reconnect** - Transparent re-authentication on session expiry
 - **Generic fallback** - `zabbix_raw_api_call` tool for any API method not explicitly defined
@@ -156,11 +156,50 @@ ZABBIX_MCP_ZABBIX_SERVERS__OLD__PASSWORD=...               # from Vault, never c
 | `VALIDATE_GET_PARAMS` | Refuse a get request Zabbix would reject or silently ignore, with the allowed values in the message (default `true`) |
 | `RESPONSE_MAX_CHARS` | Max characters per tool response (default `50000`, min `5000`); see [Token Budget](#token-budget) |
 | `TOOLS_LIST_CACHE_TTL` | Seconds clients may cache `tools/list` (default `300`, `0` disables) |
+| `BLOCKED_TOOLS_FILE` | File listing the write tools to block, see [Write restrictions](#write-restrictions) (default: the list built into the package) |
 | `ALLOW_RAW_JSON` | Let callers use `raw_json=true`, see [Programmatic clients](#programmatic-clients-python-scripts-n8n-raw-json-output) (default `false`) |
 | `TIMEZONE` | Default zone for timestamps, see [Time zones](#time-zones) |
 | `REPORT_LOGO`, `REPORT_COMPANY`, `REPORT_SUBTITLE` | PDF report branding |
 
 Reporting delivery (`ZABBIX_MCP_REPORTING__OUTPUT_DIR`, `__LINK_TTL`, `__LINK_MAX_REPORTS`, `__DOWNLOAD_URLS`, `__EMAIL__*`) is described under [Report delivery](#report-delivery-keeping-the-pdf-out-of-the-context-window).
+
+### Write restrictions
+
+Every tool that can create, change or delete something in Zabbix (138 of them: `*_create`, `*_update`, `*_delete`, `host_massupdate`, `script_execute`, `event_acknowledge`, `configuration_import`, `history_push`, `action_prepare`/`action_confirm`, `zabbix_raw_api_call`, ...) is named in one plain text file, [`src/zabbix_mcp/blocked_write_tools.txt`](src/zabbix_mcp/blocked_write_tools.txt). **Everything listed there is blocked**, so out of the box the server exposes only the 66 read tools and cannot change anything.
+
+```text
+# one tool per line, "#" starts a comment, wildcards work
+host_create
+*_delete
+zabbix_raw_api_call
+```
+
+What "blocked" means:
+
+- the tool is **not registered**: the model never sees it in `tools/list`;
+- the same operation is **refused by API method name** in `zabbix_raw_api_call` and in `action_prepare` / `action_confirm`: `host.delete` is refused while `host_delete` is listed. A prompt cannot talk the server out of it - the check runs in the server before anything is sent to Zabbix;
+- a line that names no tool is logged as a warning (a misspelt line blocks nothing); a missing or unreadable file stops the start-up instead of meaning "nothing is blocked".
+
+**To allow a tool, delete its line** and restart. It then still writes only to Zabbix servers that are not `READ_ONLY` (`ZABBIX_MCP_ZABBIX_SERVERS__<NAME>__READ_ONLY=false`), so two independent switches have to agree. The start-up log lists the write tools that are enabled:
+
+```
+Write restrictions (zabbix_mcp/blocked_write_tools.txt (built in)): 138 patterns, 138 of 138 write tools blocked
+No write tool is enabled: the server cannot change data in Zabbix
+```
+
+Typical edits:
+
+| Goal | Edit |
+|---|---|
+| Let the model acknowledge events only | delete `event_acknowledge` |
+| Allow creating and updating maintenance windows, never deleting | delete `maintenance_create`, `maintenance_update` |
+| Allow everything except deletes | replace the file with `*_delete` and `zabbix_raw_api_call`, `action_prepare`, `action_confirm` |
+
+Keep `zabbix_raw_api_call` and `action_prepare` / `action_confirm` listed unless you really mean to let the model send arbitrary methods: they are checked per method against the list, but a write method that has no dedicated tool is not covered by it.
+
+To use a different file (for example a Kubernetes ConfigMap mounted into the pod, so the list is changed without rebuilding the image) set `ZABBIX_MCP_SERVER__BLOCKED_TOOLS_FILE=/path/to/file`. `python -m zabbix_mcp.write_policy` prints every write tool the server knows, to start a new file from or to check that a new release added nothing you have not seen.
+
+Users, user groups, user directories, roles, API tokens and MFA are separate: they are never available, whatever this file says.
 
 ### Authentication of MCP clients
 
@@ -652,7 +691,7 @@ The set of report templates is fixed to the built-in ones above. See [`docs/REPO
 
 ## Token Budget
 
-By default the server exposes all 205 tools (191 Zabbix API + 14 extension). Each tool's JSON schema (name, description, 20-40 optional parameters) adds roughly 400-500 tokens to the MCP tool catalog that is sent to the LLM at the start of every session. **With the default "all tools" configuration, the catalog alone costs ~90k tokens before your first prompt even reaches the model.** This is the single largest driver of token usage - far more than compact vs. extended response mode.
+With no write tool unblocked the server exposes the 66 read tools; with every write tool allowed it exposes all 205 (191 Zabbix API + 14 extension). Each tool's JSON schema (name, description, 20-40 optional parameters) adds roughly 400-500 tokens to the MCP tool catalog that is sent to the LLM at the start of every session. **With the default "all tools" configuration, the catalog alone costs ~90k tokens before your first prompt even reaches the model.** This is the single largest driver of token usage - far more than compact vs. extended response mode.
 
 **Fix:** add a tools allowlist to expose only what you need:
 

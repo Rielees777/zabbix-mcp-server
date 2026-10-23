@@ -67,6 +67,14 @@ For additional origins set `ZABBIX_MCP_SERVER__ALLOWED_ORIGINS`, e.g. `https://a
 
 When `PUBLIC_URL`, `ALLOWED_ORIGINS` and `ALLOWED_HOSTS` are all unset on a non-localhost bind, protection stays off and the server logs a startup warning pointing here.
 
+### Blocked Write Tools
+
+- Every tool that can change data in Zabbix (138) is listed in `src/zabbix_mcp/blocked_write_tools.txt` and **blocked by default**: not registered, and refused by API method name in `zabbix_raw_api_call` and `action_prepare` / `action_confirm` (rechecked at `action_confirm`)
+- The check runs in the server before any call to Zabbix, so no prompt can lift it; the only way to allow a tool is to remove its line from the file the operator controls (`ZABBIX_MCP_SERVER__BLOCKED_TOOLS_FILE`, or the built-in list) and restart
+- A missing or unreadable file stops the start-up (fail closed); a line that matches no tool is logged as a warning; the start-up log names every write tool that is enabled
+- A test fails when a new write tool is not yet in the shipped list
+- Limit: a write method that has no dedicated tool is not covered by the list. Keep `zabbix_raw_api_call` and `action_prepare` / `action_confirm` blocked unless arbitrary methods are acceptable, and give the Zabbix API user a role that matches
+
 ### Read-Only Mode
 
 - Zabbix servers are `READ_ONLY=true` by default
