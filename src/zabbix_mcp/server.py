@@ -3081,7 +3081,7 @@ def run_server(
             "and 'limit' parameters. Write operations (create/update/delete) are only "
             "allowed on servers not configured as read_only."
         ),
-        website_url="https://github.com/initMAX/zabbix-mcp-server",
+        website_url="https://gitlab.sovcombank.group/devnetops-mcp/zabbix-mcp-server",
         icons=_load_server_icons(),
         extensions=[_tasks_extension],
         **auth_kwargs,

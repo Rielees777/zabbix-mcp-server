@@ -5,9 +5,6 @@ __pycache__
 dist
 build
 *.egg-info
-.readme
-.mcp.json
-.mcp.json.example
 .env
 .env.*
 *.key
@@ -15,6 +12,5 @@ build
 *.p12
 .DS_Store
 .claude
-.github
 node_modules
 test-results

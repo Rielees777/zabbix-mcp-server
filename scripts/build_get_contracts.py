@@ -74,6 +74,10 @@ def _spec(raw: dict, where: str, *, prop: bool) -> dict:
     return out
 
 
+# Zabbix objects this server never exposes (see zabbix_mcp.api.BLOCKED_API_OBJECTS).
+EXCLUDED_OBJECTS = {"user", "usergroup", "userdirectory", "role", "token", "mfa"}
+
+
 def main(argv: list[str]) -> None:
     paths, observed_paths = [], []
     bucket = paths
@@ -88,6 +92,8 @@ def main(argv: list[str]) -> None:
     for path in paths:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         for name, raw in (data.get("methods") or {}).items():
+            if name.split(".")[0] in EXCLUDED_OBJECTS:
+                continue
             if name in methods:
                 raise SystemExit(f"{path}: method {name} already defined")
             common = sorted(set(raw.get("common") or []))
@@ -106,6 +112,8 @@ def main(argv: list[str]) -> None:
                 "notes": list(raw.get("notes") or []),
             }
         for name, raw in (data.get("objects") or {}).items():
+            if name in EXCLUDED_OBJECTS:
+                continue
             props = {p: _spec(r, f"object {name}.{p}", prop=True)
                      for p, r in sorted((raw.get("props") or {}).items())}
             if name in objects and objects[name]["props"] != props:
@@ -126,6 +134,8 @@ def main(argv: list[str]) -> None:
         if release not in RELEASES:
             raise SystemExit(f"{path}: unknown release {release}")
         for obj, keys in (data.get("returned") or {}).items():
+            if obj in EXCLUDED_OBJECTS:
+                continue
             probes.setdefault(obj, {})[release] = set(keys)
         for obj, props in (data.get("observed") or {}).items():
             for prop, raw in props.items():

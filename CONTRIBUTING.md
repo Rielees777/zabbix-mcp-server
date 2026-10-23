@@ -5,7 +5,7 @@ Thank you for your interest in contributing!
 ## Getting Started
 
 ```bash
-git clone https://github.com/initMAX/zabbix-mcp-server.git
+git clone https://gitlab.sovcombank.group/devnetops-mcp/zabbix-mcp-server.git
 cd zabbix-mcp-server
 python3 -m venv .venv
 source .venv/bin/activate
