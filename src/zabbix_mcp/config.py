@@ -239,6 +239,9 @@ class ServerConfig(_Frozen):
     allow_raw_json: bool = False
     # Default zone for every Zabbix entry that has none of its own.
     timezone: str = ""
+    # Zabbix server used when a call names none. Empty = the first one in
+    # alphabetical order (the order of environment variables is not stable).
+    default_server: str | None = None
     # File listing the tools that may change data in Zabbix and are blocked
     # (see zabbix_mcp.write_policy). None = the list built into the package.
     blocked_tools_file: str | None = None
@@ -251,6 +254,13 @@ class ServerConfig(_Frozen):
     @classmethod
     def _split(cls, value: Any) -> Any:
         return _csv(value)
+
+    @field_validator("default_server", mode="before")
+    @classmethod
+    def _default_server_name(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip().lower() or None
+        return value
 
     @field_validator("log_level", mode="before")
     @classmethod
@@ -494,6 +504,22 @@ class AppConfig(BaseSettings):
                 reason = _format_error(exc)
                 logger.warning("Skipping Zabbix server '%s' because of config error: %s", name, reason)
                 skipped[name] = reason
+        # Deterministic order: the configured default first, then by name. The
+        # first entry is the default server, and environment variables carry no order.
+        server = data.get("server")
+        wanted = server.get("default_server") if isinstance(server, dict) else getattr(server, "default_server", None)
+        wanted = wanted.strip().lower() if isinstance(wanted, str) and wanted.strip() else None
+        if wanted is not None and wanted not in good:
+            raise ValueError(
+                f"default_server '{wanted}' is not a valid Zabbix server (configured: "
+                f"{', '.join(sorted(good)) or 'none'}"
+                + (f"; skipped: {', '.join(sorted(skipped))}" if skipped else "") + ")"
+            )
+        ordered = sorted(good)
+        if wanted is not None:
+            ordered.remove(wanted)
+            ordered.insert(0, wanted)
+        good = {name: good[name] for name in ordered}
         return {**data, "zabbix_servers": good, "skipped_zabbix_servers": skipped}
 
     @property

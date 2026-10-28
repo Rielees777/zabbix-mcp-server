@@ -87,6 +87,31 @@ class TestConfig(unittest.TestCase):
         with self.assertRaises(ConfigError):
             self._load({"ZABBIX_MCP_SERVER__TRANSPORT": "stdio"})
 
+    def test_default_server_does_not_depend_on_variable_order(self):
+        a = {"ZABBIX_MCP_ZABBIX_SERVERS__ZBX_B__URL": "http://b", "ZABBIX_MCP_ZABBIX_SERVERS__ZBX_B__API_TOKEN": "tb"}
+        b = {"ZABBIX_MCP_ZABBIX_SERVERS__ZBX_A__URL": "http://a", "ZABBIX_MCP_ZABBIX_SERVERS__ZBX_A__API_TOKEN": "ta"}
+        for first, second in ((a, b), (b, a)):
+            cfg = self._load({**first, **second})
+            self.assertEqual(list(cfg.zabbix_servers), ["zbx_a", "zbx_b"])
+            self.assertEqual(cfg.default_server, "zbx_a")
+
+    def test_default_server_can_be_chosen(self):
+        env = {
+            "ZABBIX_MCP_ZABBIX_SERVERS__ZBX_A__URL": "http://a", "ZABBIX_MCP_ZABBIX_SERVERS__ZBX_A__API_TOKEN": "ta",
+            "ZABBIX_MCP_ZABBIX_SERVERS__ZBX_B__URL": "http://b", "ZABBIX_MCP_ZABBIX_SERVERS__ZBX_B__API_TOKEN": "tb",
+        }
+        cfg = self._load({**env, "ZABBIX_MCP_SERVER__DEFAULT_SERVER": "ZBX_B"})
+        self.assertEqual(cfg.default_server, "zbx_b")
+        self.assertEqual(list(cfg.zabbix_servers), ["zbx_b", "zbx_a"])
+        self.assertEqual(cfg.zabbix_servers["zbx_a"].api_token.get_secret_value(), "ta")
+        self.assertEqual(cfg.zabbix_servers["zbx_b"].api_token.get_secret_value(), "tb")
+
+    def test_unknown_default_server_stops_the_start(self):
+        env = {"ZABBIX_MCP_ZABBIX_SERVERS__A__URL": "http://a", "ZABBIX_MCP_ZABBIX_SERVERS__A__API_TOKEN": "ta"}
+        with self.assertRaises(ConfigError) as ctx:
+            self._load({**env, "ZABBIX_MCP_SERVER__DEFAULT_SERVER": "nope"})
+        self.assertIn("nope", str(ctx.exception))
+
     def test_secrets_are_masked_but_readable(self):
         cfg = self._load({
             "ZABBIX_MCP_ZABBIX_SERVERS__PROD__URL": "http://z",

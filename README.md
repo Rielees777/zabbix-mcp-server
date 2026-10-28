@@ -60,7 +60,7 @@ Lists (`tools`, `allowed_hosts`, ...) are written as a comma separated string or
 
 ### Zabbix servers
 
-At least one server is required. `<NAME>` is any label (it is lower-cased); the first one is the default.
+At least one server is required. `<NAME>` is any label (it is lower-cased). Each server has its own URL and its own API token. A tool call picks one with the `server` parameter; without it the default is used: `ZABBIX_MCP_SERVER__DEFAULT_SERVER`, otherwise the first name in alphabetical order (the order of environment variables is not stable).
 
 ```bash
 ZABBIX_MCP_ZABBIX_SERVERS__PROD__URL=https://zabbix.example.com
@@ -117,6 +117,7 @@ ZABBIX_MCP_ZABBIX_SERVERS__OLD__PASSWORD=...               # from Vault, never c
 | Variable (after `ZABBIX_MCP_SERVER__`) | Description |
 |---|---|
 | `TRANSPORT` | `stdio` (default), `http` (recommended) or `sse` |
+| `DEFAULT_SERVER` | Zabbix server used when a call names none (default: first in alphabetical order) |
 | `HOST`, `PORT` | HTTP bind address and port (default `127.0.0.1:8080`) |
 | `AUTH_TOKEN` | Bearer token MCP clients must send, see [Authentication](#authentication-of-mcp-clients) |
 | `AUTH_TOKEN_EXPIRES_AT` | ISO 8601 moment after which the token is rejected (`2026-12-31`, `2026-12-31T12:00:00Z`) |
