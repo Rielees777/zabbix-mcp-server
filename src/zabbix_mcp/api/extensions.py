@@ -166,7 +166,7 @@ def graph_render(
         #      modern installs.
         req = urllib.request.Request(chart_url)
 
-        api_token = srv_config.api_token.get_secret_value()
+        api_token = client_manager.effective_token(server_name)
         if api_token:
             req.add_header("Authorization", f"Bearer {api_token}")
 

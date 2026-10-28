@@ -24,6 +24,11 @@ readOnlyRootFilesystem: "false"
 #   ZABBIX_MCP_SERVER__AUTH_TOKEN               - bearer-токен для MCP-клиентов
 #   ZABBIX_MCP_SERVER__AUTH_TOKEN_EXPIRES_AT    - (необязательно) срок действия токена, ISO 8601
 # Порт и режим сервера (transport=http, host=0.0.0.0, port=30030) заданы в ci-cd-files/Dockerfile.
+# Если у каждого пользователя свой токен Zabbix (не из Vault), вместо API_TOKEN для сервера задаётся
+# имя заголовка запроса, в котором клиент присылает свой токен (значения URL и имя заголовка не секретны):
+#   ZABBIX_MCP_ZABBIX_SERVERS__<ИМЯ>__URL: "https://..."
+#   ZABBIX_MCP_ZABBIX_SERVERS__<ИМЯ>__TOKEN_HEADER: "X-MCP-Token-UT"
+# Запрос без заголовка отклоняется. Заголовки с токенами не должны попадать в логи шлюза.
 # Инструменты, меняющие данные в Zabbix, заблокированы списком src/zabbix_mcp/blocked_write_tools.txt
 # (по умолчанию заблокированы все 138). Чтобы разрешить инструмент, удалите его строку и пересоберите образ,
 # либо подмонтируйте свой файл и укажите ZABBIX_MCP_SERVER__BLOCKED_TOOLS_FILE=<путь>.

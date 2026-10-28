@@ -24,6 +24,7 @@ import re
 import ssl
 import threading
 import time
+from collections import OrderedDict
 from typing import Any
 
 from zabbix_utils import ZabbixAPI
@@ -98,6 +99,7 @@ try:
 except Exception:
     pass
 
+from zabbix_mcp.auth import current_user_tokens, token_fingerprint
 from zabbix_mcp.config import AppConfig, ZabbixServerConfig
 
 logger = logging.getLogger("zabbix_mcp.client")
@@ -154,6 +156,14 @@ class _RateLimiter:
             self._buckets[key] = calls
 
 
+class MissingTokenError(ValueError):
+    """A server that takes the caller's own token was called without one."""
+
+
+# Separates the server name from the token fingerprint in a per-user client key.
+_KEY_SEP = "\x1f"
+
+
 class ClientManager:
     """Manages connections to multiple Zabbix servers with lazy connect and auto-reconnect.
 
@@ -168,7 +178,9 @@ class ClientManager:
 
     def __init__(self, config: AppConfig) -> None:
         self._config = config
-        self._clients: dict[str, ZabbixAPI] = {}
+        # Service-token servers: one client per server name. Per-user-token
+        # servers: one client per (server, token fingerprint), bounded below.
+        self._clients: OrderedDict[str, ZabbixAPI] = OrderedDict()
         self._versions: dict[str, str] = {}
         # Zone Zabbix itself reports for a server (issue #75), cached per
         # server: the API user's own zone, else the frontend default.
@@ -204,8 +216,44 @@ class ClientManager:
             )
         return self._config.zabbix_servers[name]
 
-    def _connect(self, name: str) -> ZabbixAPI:
-        """Create and authenticate a Zabbix API client."""
+    _MAX_USER_CLIENTS = 256
+
+    def _client_key(self, name: str) -> tuple[str, str | None]:
+        """Cache key and the caller's token for *name*.
+
+        A server with ``token_header`` takes the token from the current request;
+        without one the call is refused, never answered with another identity.
+        Other servers use their service token and the plain server name.
+        """
+        srv = self.get_server_config(name)
+        header = getattr(srv, "token_header", None)
+        if not header:
+            return name, None
+        token = ((current_user_tokens.get() or {}).get(header) or "").strip()
+        if not token:
+            raise MissingTokenError(
+                f"Server '{name}' needs your own Zabbix API token in the '{header}' request "
+                f"header, and the request did not carry one."
+            )
+        return f"{name}{_KEY_SEP}{token_fingerprint(token)}", token
+
+    def effective_token(self, name: str) -> str:
+        """The Zabbix API token the current call uses on *name* (service or caller's)."""
+        _, token = self._client_key(name)
+        return token or self.get_server_config(name).api_token.get_secret_value()
+
+    def _store_client(self, key: str, client: ZabbixAPI) -> None:
+        self._clients[key] = client
+        user_keys = [k for k in self._clients if _KEY_SEP in k]
+        for old in user_keys[:max(0, len(user_keys) - self._MAX_USER_CLIENTS)]:
+            self._clients.pop(old, None)
+
+    def _connect(self, name: str, token: str | None = None, *, authenticate: bool = True) -> ZabbixAPI:
+        """Create a Zabbix API client, logged in with *token* (or the service credentials).
+
+        ``authenticate=False`` returns an unauthenticated client, enough to read
+        ``apiinfo.version`` of a server whose token only arrives with requests.
+        """
         srv = self.get_server_config(name)
         logger.info("Connecting to Zabbix server '%s' at %s", name, srv.url)
 
@@ -227,6 +275,8 @@ class ClientManager:
             skip_version_check=srv.skip_version_check or legacy,
             timeout=timeout,
         )
+        if not authenticate:
+            return api
         if legacy:
             # Hard version lock. Password login exists for releases that
             # have no API tokens; on anything that has them it is just a
@@ -248,7 +298,7 @@ class ClientManager:
             )
             api.login(user=srv.username, password=srv.password.get_secret_value())
         else:
-            api.login(token=srv.api_token.get_secret_value())
+            api.login(token=token if token is not None else srv.api_token.get_secret_value())
 
         version = api.api_version()
         logger.info("Connected to '%s' - Zabbix %s", name, version)
@@ -256,25 +306,27 @@ class ClientManager:
 
     def _get_client(self, name: str) -> ZabbixAPI:
         """Get or create a client for the given server."""
+        key, token = self._client_key(name)
         # Fast path: already connected, return without taking the lock.
-        client = self._clients.get(name)
+        client = self._clients.get(key)
         if client is not None:
             return client
         # Slow path: at most one thread creates the connection.
         with self._lock:
-            client = self._clients.get(name)
+            client = self._clients.get(key)
             if client is None:
-                client = self._connect(name)
-                self._clients[name] = client
+                client = self._connect(name, token)
+                self._store_client(key, client)
             return client
 
     def _reconnect(self, name: str) -> ZabbixAPI:
         """Force reconnect to a server."""
         logger.warning("Reconnecting to Zabbix server '%s'", name)
+        key, token = self._client_key(name)
         with self._lock:
-            self._clients.pop(name, None)
-            client = self._connect(name)
-            self._clients[name] = client
+            self._clients.pop(key, None)
+            client = self._connect(name, token)
+            self._store_client(key, client)
             # A reconnect sees the server as it is NOW - most visibly a
             # Zabbix upgrade behind the same URL. Refresh the cached
             # version alongside the cached connection, otherwise
@@ -282,7 +334,7 @@ class ClientManager:
             # reporting the pre-upgrade release even after Test
             # Connection already logged the new one (issue #89).
             self._versions[name] = str(client.api_version())
-            self._zabbix_zones.pop(name, None)
+            self._zabbix_zones.pop(key, None)
             return client
 
     def get_zabbix_timezone(self, server: str) -> str:
@@ -296,7 +348,11 @@ class ClientManager:
         is not cached and also yields ``""`` - the caller falls back to
         the host zone for this one call.
         """
-        cached = self._zabbix_zones.get(server)
+        try:
+            zone_key, _ = self._client_key(server)
+        except MissingTokenError:
+            return ""
+        cached = self._zabbix_zones.get(zone_key)
         if cached is not None:
             return cached
         from zabbix_mcp.timezones import ZABBIX_INHERIT
@@ -345,7 +401,7 @@ class ClientManager:
         except Exception as e:  # noqa: BLE001 - connection-class failure: do not cache
             logger.warning("Could not read the time zone from '%s': %s", server, e)
             return ""
-        self._zabbix_zones[server] = zone
+        self._zabbix_zones[zone_key] = zone
         return zone
 
     @staticmethod
@@ -382,6 +438,10 @@ class ClientManager:
                 if name in self._versions:
                     continue
                 try:
+                    if self.get_server_config(name).token_header:
+                        # No token before the first request: the version needs none.
+                        self._versions.setdefault(name, self._probe_version(name))
+                        continue
                     client = self._connect(name)
                 except Exception as e:  # noqa: BLE001 - startup warm-up, never fatal
                     logger.info("Version of '%s' not known yet: %s", name, e)
@@ -392,6 +452,10 @@ class ClientManager:
         t = threading.Thread(target=_run, name="zabbix-mcp-version-warmup", daemon=True)
         t.start()
         return t
+
+    def _probe_version(self, name: str) -> str:
+        """``apiinfo.version`` through an unauthenticated client."""
+        return str(self._connect(name, authenticate=False).api_version())
 
     def resolve_server(self, server: str | None) -> str:
         """Resolve server name, falling back to default."""
@@ -489,7 +553,9 @@ class ClientManager:
           "validation flaky / sometimes OK sometimes fails".
         """
         import ssl
-        self._rate_limiter.check()
+        key, token = self._client_key(server)
+        # A caller with its own token gets its own budget; service-token servers share one.
+        self._rate_limiter.check(key if token else None)
         client = self._get_client(server)
         try:
             return self._do_call(client, method, params)
@@ -568,8 +634,11 @@ class ClientManager:
     def get_version(self, server: str) -> str:
         """Return the Zabbix API version string for the given server (cached)."""
         if server not in self._versions:
-            client = self._get_client(server)
-            self._versions[server] = str(client.api_version())
+            if self.get_server_config(server).token_header:
+                self._versions[server] = self._probe_version(server)
+            else:
+                client = self._get_client(server)
+                self._versions[server] = str(client.api_version())
         return self._versions[server]
 
     def check_write(self, server: str) -> None:
@@ -583,11 +652,13 @@ class ClientManager:
 
     def close(self) -> None:
         """Close all client connections. Skip logout for token-based auth."""
-        for name, client in self._clients.items():
+        for key, client in self._clients.items():
+            name = key.split(_KEY_SEP)[0]
             try:
                 # Token-based auth does not use sessions — logout is a no-op
                 # that would generate a warning. Only logout for session-based auth.
-                if not self.get_server_config(name).api_token.get_secret_value():
+                srv = self.get_server_config(name)
+                if _KEY_SEP not in key and not srv.api_token.get_secret_value():
                     client.logout()
                 logger.info("Disconnected from '%s'", name)
             except Exception:

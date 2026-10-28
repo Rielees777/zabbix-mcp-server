@@ -8,6 +8,8 @@ The environment-only release. The server is now configured entirely through `ZAB
 
 - **Blocked write tools file.** `src/zabbix_mcp/blocked_write_tools.txt` lists the 138 tools that can change data in Zabbix; they are blocked by default (66 read tools remain visible). Blocked tools are not registered and are refused by API method name in `zabbix_raw_api_call` and `action_prepare` / `action_confirm`. Delete a line to allow a tool; `ZABBIX_MCP_SERVER__BLOCKED_TOOLS_FILE` points to another file (a ConfigMap, say); `python -m zabbix_mcp.write_policy` prints all write tools. A missing file stops the start-up, an unknown name is warned about, and a test requires every new write tool to be listed.
 
+- **Per-user Zabbix tokens.** A Zabbix server can be configured with `ZABBIX_MCP_ZABBIX_SERVERS__<NAME>__TOKEN_HEADER=X-MCP-Token-UT` instead of `API_TOKEN`: every request is made with the Zabbix token it carries in that header (one header per server, so two servers take two tokens), and a request without it is rejected. The token follows each request, not the MCP session; connections are kept per token (bounded), rate limiting is per token, versions are read without a token. Service-token and per-user servers can be mixed. Covered by unit tests and by an end-to-end test against a fake Zabbix in both protocol generations.
+
 ### Fixed
 
 - **`action_prepare` / `action_confirm` could reach the user methods** (`user.*`, `usergroup.*`, ...) that `zabbix_raw_api_call` already refused, because they take any method name. They now apply the same checks, and `action_confirm` repeats them.

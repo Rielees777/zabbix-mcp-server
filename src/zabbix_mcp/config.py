@@ -91,6 +91,13 @@ class _Frozen(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
+# Headers a per-user Zabbix token must not be read from.
+_RESERVED_HEADERS = frozenset({
+    "authorization", "proxy-authorization", "cookie", "host", "content-type", "content-length",
+    "accept", "origin", "user-agent", "mcp-session-id", "mcp-protocol-version", "mcp-method", "mcp-name",
+})
+
+
 class ZabbixServerConfig(_Frozen):
     """Configuration for a single Zabbix server."""
 
@@ -112,6 +119,11 @@ class ZabbixServerConfig(_Frozen):
     # rather than a revocable token. Mutually exclusive with ``api_token``.
     # The client additionally refuses this path against any Zabbix >= 5.4.
     legacy_auth: bool = False
+    # Per-user tokens: name of the request header (e.g. "X-MCP-Token-UT") that carries
+    # the caller's own Zabbix API token for THIS server. Set = each request is made
+    # with the token it brings and a request without the header is rejected; api_token
+    # must stay empty. Unset = the service api_token below is used.
+    token_header: str | None = None
     username: str = ""
     password: SecretStr = SecretStr("")
     # Optional username + password used by ``graph_render`` to acquire a
@@ -160,8 +172,30 @@ class ZabbixServerConfig(_Frozen):
     def _check_timezone(cls, value: str) -> str:
         return _validate_timezone_setting(value)
 
+    @field_validator("token_header", mode="before")
+    @classmethod
+    def _check_token_header(cls, value: Any) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        name = str(value).strip().lower()
+        import re
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", name):
+            raise ValueError(f"token_header '{value}' is not a valid HTTP header name")
+        if name in _RESERVED_HEADERS:
+            raise ValueError(f"token_header '{value}' is reserved; pick a dedicated header such as X-MCP-Token-UT")
+        return name
+
     @model_validator(mode="after")
     def _check_credentials(self) -> "ZabbixServerConfig":
+        if self.token_header:
+            if self.legacy_auth or self.username or self.password.get_secret_value():
+                raise ValueError("token_header cannot be combined with password / legacy_auth login")
+            if self.api_token.get_secret_value().strip():
+                raise ValueError(
+                    "sets both token_header and api_token. With token_header every request "
+                    "brings its own token - remove api_token, or remove token_header to use a service token."
+                )
+            return self
         token = self.api_token.get_secret_value().strip()
         user = self.username.strip()
         password = self.password.get_secret_value().strip()
@@ -515,6 +549,15 @@ class AppConfig(BaseSettings):
                 f"{', '.join(sorted(good)) or 'none'}"
                 + (f"; skipped: {', '.join(sorted(skipped))}" if skipped else "") + ")"
             )
+        seen: dict[str, str] = {}
+        for name, srv_cfg in good.items():
+            if srv_cfg.token_header:
+                if srv_cfg.token_header in seen:
+                    raise ValueError(
+                        f"servers '{seen[srv_cfg.token_header]}' and '{name}' read their token from the "
+                        f"same header '{srv_cfg.token_header}'; each server needs its own header"
+                    )
+                seen[srv_cfg.token_header] = name
         ordered = sorted(good)
         if wanted is not None:
             ordered.remove(wanted)

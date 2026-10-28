@@ -54,7 +54,7 @@ from zabbix_mcp.api.types import MethodDef
 from zabbix_mcp.api.versions import unavailable_reason
 from zabbix_utils.exceptions import APIRequestError
 from zabbix_mcp.client import ClientManager, RateLimitError, ReadOnlyError
-from zabbix_mcp.auth import BearerTokenVerifier, caller_fingerprint
+from zabbix_mcp.auth import BearerTokenVerifier, caller_fingerprint, current_user_tokens
 from zabbix_mcp.config import AppConfig
 from zabbix_mcp.write_policy import WritePolicy, write_tool_names
 from zabbix_mcp.timezones import EPOCH_FIELDS, add_local_times, now_local, resolve_zone, zone_name
@@ -2866,6 +2866,44 @@ def _register_resources(mcp: MCPServer, client_manager: ClientManager) -> None:
         logger.info("Registered MCP resources (zabbix://%s/...)", default_srv)
 
 
+def _request_headers(ctx: Any) -> Any:
+    """Headers of the HTTP request behind a lowlevel request context, or None (stdio)."""
+    return getattr(getattr(ctx, "request", None), "headers", None)
+
+
+def _install_user_token_context(mcp: MCPServer, config: AppConfig) -> list[str]:
+    """Let servers that take the caller's own token read it from the request.
+
+    ``tools/call`` and ``resources/read`` are wrapped so that, while the call
+    runs, ``current_user_tokens`` holds the token headers of THIS request - not
+    of the request that opened the session. Returns the header names in use.
+    """
+    wanted = sorted({s.token_header for s in config.zabbix_servers.values() if s.token_header})
+    if not wanted:
+        return []
+    for method in ("tools/call", "resources/read"):
+        original = mcp._lowlevel_server.get_request_handler(method)
+        if original is None:
+            continue
+
+        async def wrapped(ctx, params, _orig=original):
+            headers = _request_headers(ctx)
+            tokens = {}
+            if headers is not None:
+                for name in wanted:
+                    value = headers.get(name)
+                    if value and value.strip():
+                        tokens[name] = value.strip()
+            reset = current_user_tokens.set(tokens)
+            try:
+                return await _orig.handler(ctx, params)
+            finally:
+                current_user_tokens.reset(reset)
+
+        mcp._lowlevel_server.add_request_handler(method, original.params_type, wrapped)
+    return wanted
+
+
 def run_server(
     config: AppConfig,
     *,
@@ -3138,6 +3176,15 @@ def run_server(
     mcp._lowlevel_server.add_request_handler(
         "tools/list", _orig_entry.params_type, _list_tools_with_execution)
 
+    token_headers = _install_user_token_context(mcp, config)
+    if token_headers:
+        per_user = [n for n, s in config.zabbix_servers.items() if s.token_header]
+        logger.info(
+            "Per-user Zabbix tokens: servers %s read them from the request headers %s; "
+            "a request without the header is rejected", ", ".join(per_user), ", ".join(token_headers),
+        )
+        if transport == "stdio":
+            logger.warning("Per-user token servers cannot be used over stdio (no request headers)")
     tool_count = _register_tools(
         mcp, client_manager, config.server.tools, config.server.disabled_tools,
         allowed_import_dirs=config.server.allowed_import_dirs,

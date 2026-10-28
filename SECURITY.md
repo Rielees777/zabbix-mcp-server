@@ -36,6 +36,13 @@ We will acknowledge your report within 48 hours and work with you on a fix.
 
 No tool reads or changes Zabbix users, user groups, user directories, roles, API tokens or MFA methods, and `zabbix_raw_api_call` refuses every method of those objects (`user.*`, `usergroup.*`, `userdirectory.*`, `role.*`, `token.*`, `mfa.*`, matched case-insensitively), so they cannot be reached by the MCP client even with a Zabbix API token that is allowed to. Global authentication settings (`authentication.get/update`) and user macros remain available. Other `*.get` tools can still show user ids that Zabbix returns as part of their own objects (for example `userid` in an action's operations).
 
+### Per-User Zabbix Tokens
+
+- With `TOKEN_HEADER` a server takes the caller's own Zabbix API token from the request header named there, so Zabbix enforces and audits that user's permissions. A request without the header is rejected, never served with another identity
+- The token is read from the request being served (not from the one that opened the session), cached only as a connection keyed by its hash, never logged, and bounded (256 connections, a rate-limit bucket per token)
+- Header values are credentials: use TLS on every hop and keep them out of gateway and proxy logs. Two servers cannot read the same header; the reserved headers (`Authorization`, `Cookie`, `Host`, ...) are refused
+- Not available over stdio
+
 ### Zabbix Credentials
 
 Zabbix API tokens inherit the permissions of their Zabbix user - use a dedicated, least-privilege user per server.

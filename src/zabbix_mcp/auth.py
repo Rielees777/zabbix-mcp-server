@@ -47,6 +47,18 @@ current_request_base: contextvars.ContextVar[str | None] = contextvars.ContextVa
     "current_request_base", default=None)
 
 
+# Zabbix API tokens the CALLER sent with the current request, by lower-case header
+# name. Set around every tools/call and resources/read (see server.run_server); only
+# the headers some Zabbix server is configured to read are kept. None outside a request.
+current_user_tokens: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "current_user_tokens", default=None)
+
+
+def token_fingerprint(token: str) -> str:
+    """Short non-reversible id of a secret, for cache keys and rate-limit buckets."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
+
+
 def parse_expiry(value: str) -> datetime:
     """Parse an ISO 8601 timestamp into an aware UTC datetime.
 
@@ -102,4 +114,4 @@ def caller_fingerprint() -> str | None:
     access = get_access_token()
     if access is None:
         return None
-    return hashlib.sha256(access.token.encode()).hexdigest()[:16]
+    return token_fingerprint(access.token)

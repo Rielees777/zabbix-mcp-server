@@ -75,7 +75,8 @@ A server whose settings are invalid is skipped with a warning (and listed by `he
 | Variable (after `ZABBIX_MCP_ZABBIX_SERVERS__<NAME>__`) | Description |
 |---|---|
 | `URL` | Zabbix frontend URL, `http://` or `https://` (required) |
-| `API_TOKEN` | Zabbix API token (required, except with `LEGACY_AUTH`) |
+| `API_TOKEN` | Service Zabbix API token (required, except with `TOKEN_HEADER` or `LEGACY_AUTH`) |
+| `TOKEN_HEADER` | Per-user tokens: name of the request header that carries the caller's own Zabbix API token for this server, see [Per-user Zabbix tokens](#per-user-zabbix-tokens). Replaces `API_TOKEN` |
 | `READ_ONLY` | Block write operations (default `true`) |
 | `VERIFY_SSL` | Verify the TLS certificate (default `true`) |
 | `SKIP_VERSION_CHECK` | Skip the zabbix-utils version check (default `false`) |
@@ -84,7 +85,7 @@ A server whose settings are invalid is skipped with a warning (and listed by `he
 | `FRONTEND_USERNAME` / `FRONTEND_PASSWORD` | Login used by `graph_render` for Zabbix 6.0+ chart sessions |
 | `LEGACY_AUTH`, `USERNAME`, `PASSWORD` | Password login for Zabbix 5.0 / 5.2, see [Legacy auth](#legacy-auth-zabbix-50-and-52-only) |
 
-**`API_TOKEN`** authenticates the MCP server to Zabbix. Create it in the Zabbix frontend under **Users → API tokens → Create API token**; it inherits the permissions of its user:
+**`API_TOKEN`** authenticates the MCP server to Zabbix (or each user does, with `TOKEN_HEADER`). Create it in the Zabbix frontend under **Users → API tokens → Create API token**; it inherits the permissions of its user:
 
 | Use case | Recommended Zabbix role | `READ_ONLY` |
 |----------|------------------|--------------------|
@@ -93,6 +94,41 @@ A server whose settings are invalid is skipped with a warning (and listed by `he
 | Complete API access (users, settings, global scripts) | **Super admin** role | `false` |
 
 Use the principle of least privilege - create a dedicated Zabbix user for the MCP server.
+
+#### Per-user Zabbix tokens
+
+By default the server talks to Zabbix with one service token (`API_TOKEN`, from Vault). When every user has a Zabbix token of their own, the token can instead travel with each request, so Zabbix applies **that user's** permissions and records that user in its own audit log:
+
+```bash
+ZABBIX_MCP_ZABBIX_SERVERS__ZBX_A__URL=https://zabbix-a.example.com
+ZABBIX_MCP_ZABBIX_SERVERS__ZBX_A__TOKEN_HEADER=X-MCP-Token-UT      # no API_TOKEN
+ZABBIX_MCP_ZABBIX_SERVERS__ZBX_B__URL=https://zabbix-b.example.com
+ZABBIX_MCP_ZABBIX_SERVERS__ZBX_B__TOKEN_HEADER=X-MCP-Token-UTS
+```
+
+The client then sends the header(s) with its requests (here through the gateway):
+
+```json
+"zabbix": {
+  "url": "https://ai-gateway-prod.sovcombank.group/mcp/zabbix",
+  "type": "remote",
+  "enabled": true,
+  "headers": {
+    "X-MCP-Token-UT": "<my token on zbx_a>",
+    "X-MCP-Token-UTS": "<my token on zbx_b>"
+  }
+}
+```
+
+- **Each server has its own header**; two servers cannot share one. A server without `TOKEN_HEADER` keeps using its `API_TOKEN`, so the modes can be mixed.
+- **A request without the header is rejected** with a message naming the header; nothing is sent to Zabbix and there is no fallback to another identity.
+- The token is read from **the request being served**, not from the one that opened the MCP session, so a client can change it between calls.
+- The server keeps one Zabbix connection per token (at most 256, oldest dropped) and a rate-limit budget per token. Tokens are never logged; only a short hash is used internally.
+- The version of a server is read without any token, so `tools/list` is complete before the first request.
+- It needs HTTP or SSE: over stdio there are no request headers and such a server cannot be used.
+- Everything else still applies on top: the blocked write-tools file, `READ_ONLY`, and the exclusion of Zabbix users. The caller's Zabbix role decides what the Zabbix API lets them read.
+- The header values are credentials: they must only travel over TLS (gateway to server included), and the gateway must not log them.
+- `Authorization: Bearer` stays separate. It is the optional MCP bearer (`ZABBIX_MCP_SERVER__AUTH_TOKEN`), not a Zabbix token.
 
 #### Legacy auth (Zabbix 5.0 and 5.2 only)
 
