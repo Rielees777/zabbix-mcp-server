@@ -364,6 +364,27 @@ class TestOverHttp(unittest.TestCase):
         self.assertIn("a:alice-stateless", self._text(one))
         self.assertIn("a:bob-stateless", self._text(two))
 
+    def test_raw_json_is_not_advertised_while_it_is_refused(self):
+        sid = self._session()
+        status, resp, _ = _post(self.url, {"jsonrpc": "2.0", "id": 9, "method": "tools/list", "params": {}},
+                                {"Mcp-Session-Id": sid, "MCP-Protocol-Version": "2025-11-25"})
+        tools = resp["result"]["tools"]
+        self.assertGreater(len(tools), 50)
+        offenders = [t["name"] for t in tools if "raw_json" in t["inputSchema"].get("properties", {})]
+        self.assertEqual(offenders, [])
+        # asking for it anyway is still refused
+        result = self._legacy_call_args(sid, {"server": "zbx_a", "limit": 1, "raw_json": True},
+                                        {"X-MCP-Token-UT": "tok"})
+        self.assertTrue(result.get("isError"))
+        self.assertIn("raw_json", self._text(result))
+
+    def _legacy_call_args(self, sid, arguments, extra_headers):
+        status, resp, _ = _post(self.url, {
+            "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+            "params": {"name": "host_get", "arguments": arguments},
+        }, {"Mcp-Session-Id": sid, "MCP-Protocol-Version": "2025-11-25", **extra_headers})
+        return resp["result"]
+
     def test_stateless_missing_header_is_rejected(self):
         result = self._stateless_call("zbx_b", {"X-MCP-Token-UT": "only-the-other-header"})
         self.assertTrue(result.get("isError"))

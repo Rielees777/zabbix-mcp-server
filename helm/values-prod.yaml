@@ -34,6 +34,9 @@ readOnlyRootFilesystem: "false"
 # либо подмонтируйте свой файл и укажите ZABBIX_MCP_SERVER__BLOCKED_TOOLS_FILE=<путь>.
 # Запись на конкретный Zabbix дополнительно требует READ_ONLY=false (по умолчанию true).
 env:
+  # Набор инструментов по группам (README, "Token Budget"): core = 16 инструментов, около 16k токенов.
+  # Добавлять группы по запросам пользователей: core,availability,notifications,analytics,inventory,problems_raw
+  ZABBIX_MCP_SERVER__TOOLS: "core"
   # Внешний адрес, который сервер сообщает клиентам. Должен совпадать с host в ingress ниже.
   ZABBIX_MCP_SERVER__PUBLIC_URL: "https://zbx-mcp.sovcombank.group"
 

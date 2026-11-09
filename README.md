@@ -160,7 +160,7 @@ ZABBIX_MCP_ZABBIX_SERVERS__OLD__PASSWORD=...               # from Vault, never c
 | `PUBLIC_URL` | URL clients use to reach the server, see [Public URL](#public-url-and-reverse-proxy-deployments) |
 | `LOG_LEVEL`, `LOG_FILE` | `debug`/`info`/`warning`/`error`/`critical`; with no file, logs go to stderr (what a container wants) |
 | `RATE_LIMIT` | Max Zabbix API calls per minute per client (default `300`, `0` disables) |
-| `TOOLS`, `DISABLED_TOOLS` | Allow / deny list of tool categories or prefixes, e.g. `monitoring,alerts` (default: all) |
+| `TOOLS`, `DISABLED_TOOLS` | Allow / deny list of tool groups, prefixes or names, e.g. `core,availability` (default: every tool that is not blocked). See [Token Budget](#token-budget) |
 | `TLS_CERT_FILE`, `TLS_KEY_FILE` | Native HTTPS, see [TLS](#tls--https) |
 | `CORS_ORIGINS` | Allowed CORS origins (default: disabled) |
 | `ALLOWED_HOSTS` | Client IP allowlist - IPs and CIDR ranges, e.g. `10.0.0.0/24` |
@@ -695,30 +695,43 @@ The set of report templates is fixed to the built-in ones above. See [`docs/REPO
 
 ## Token Budget
 
-With no write tool unblocked the server exposes the 66 read tools; with every write tool allowed it exposes all 205 (191 Zabbix API + 14 extension). Each tool's JSON schema (name, description, 20-40 optional parameters) adds roughly 400-500 tokens to the MCP tool catalog that is sent to the LLM at the start of every session. **With the default "all tools" configuration, the catalog alone costs ~90k tokens before your first prompt even reaches the model.** This is the single largest driver of token usage - far more than compact vs. extended response mode.
+Every tool's JSON schema (name, description, 20-40 optional parameters) is sent to the model at the start of every session, so the size of the catalog is paid on each conversation. Measured (characters of the `tools/list` JSON; tokens at about 3.6 characters each, so read them as ±20%):
 
-**Fix:** add a tools allowlist to expose only what you need:
+| Catalog | Tools | Tokens |
+|---|---|---|
+| Every tool, writes allowed | 204 | ~132k |
+| Every read tool (writes blocked, the default) | 66 | ~66k |
+| `core` | 16 | ~16k |
+| `core,availability,analytics` | 22 | ~21k |
+| every group below | 30 | ~31k |
+
+`raw_json` is left out of the schemas while `ALLOW_RAW_JSON` is off (it was ~11k tokens spread over every tool), and a call that sets it is refused as before.
+
+**Fix:** choose tool groups with `ZABBIX_MCP_SERVER__TOOLS`. Groups combine, separated by commas:
 
 ```bash
-# Tight allowlist for problem triage / host inspection (~15 tools, ~7k tokens)
-ZABBIX_MCP_SERVER__TOOLS=host,hostgroup,problem,trigger,event,item
-
-# Broader set including templates and dashboards (~30 tools, ~15k tokens)
-# ZABBIX_MCP_SERVER__TOOLS=host,hostgroup,problem,trigger,event,item,template,dashboard,maintenance
+ZABBIX_MCP_SERVER__TOOLS=core                          # start here
+ZABBIX_MCP_SERVER__TOOLS=core,availability,analytics   # add groups as users ask for them
 ```
 
-Or use group names as shortcuts (pulls in more tools per group):
+| Group | Tools | ~Tokens | Contains |
+|---|---|---|---|
+| **`core`** | 16 | 15.8k | = `status` + `problems` + `metrics` + `audit` |
+| `status` | 6 | 4.1k | `host_get`, `hostgroup_get`, `host_status_get`, `hostgroup_overview_get`, `infrastructure_summary_get`, `health_check` |
+| `problems` | 3 | 4.2k | `problem_active_get`, `event_get`, `trigger_get` |
+| `metrics` | 6 | 6.2k | `item_get`, `trend_get`, `history_get`, `item_history_summary_get`, `graph_get`, `graphitem_get` (values, peaks, spikes) |
+| `audit` | 1 | 1.3k | `auditlog_get` (who changed what, when) |
+| `availability` | 3 | 2.6k | `sla_get`, `sla_getsli`, `maintenance_get` |
+| `notifications` | 1 | 1.4k | `alert_get` |
+| `analytics` | 3 | 2.5k | `item_threshold_search`, `capacity_forecast`, `anomaly_detect` |
+| `inventory` | 6 | 6.9k | `template_get`, `hostinterface_get`, `proxy_get`, `httptest_get`, `hanode_get`, `housekeeping_get` |
+| `problems_raw` | 1 | 2.1k | `problem_get` (low-level; `problem_active_get` covers most needs) |
 
-| Group | Tools | Contains |
-|---|---|---|
-| `monitoring` | 87 | host, hostgroup, item, trigger, problem, event, history, trend, graph, sla, discovery, httptest, hostinterface, hostprototype, ... + the 5 pre-correlated views |
-| `data_collection` | 27 | template, templategroup, templatedashboard, valuemap, dashboard |
-| `alerts` | 16 | action, alert, mediatype, script |
-| `users` | 7 | usermacro (user, usergroup, userdirectory, role, token and mfa are not exposed at all) |
-| `administration` | 55 | settings, housekeeping, authentication, maintenance, map, proxy, proxygroup, autoreg, regexp, ... |
-| `extensions` | 14 | graph_render, anomaly_detect, capacity_forecast, item_threshold_search, report_generate, action_prepare, action_confirm, problem_active_get, host_status_get, hostgroup_overview_get, infrastructure_summary_get, item_history_summary_get, zabbix_raw_api_call, health_check |
+Everything else (discovery rules and prototypes, dashboards, maps, scripts, media types, user macros, configuration export, settings, ...) is in no group and stays unavailable unless you name it. User macros, scripts, media types and connectors can hold credentials in clear text, so they are left out on purpose.
 
-`ZABBIX_MCP_SERVER__DISABLED_TOOLS` is the denylist counterpart. To serve different audiences different catalogs, run one instance per audience.
+How entries are matched: a **prefix** selects the generated tools (`host` = `host_get`, ...), a **full name** selects composite and extension tools (`host_status_get`, `health_check`, `capacity_forecast`). Groups may contain groups. A misspelt entry selects nothing, so the start-up log names entries that match no tool or group. The tool groups only choose what is offered: the blocked write-tools file still decides what can change data, and a prefix such as `host` would also select `host_create` if that tool were removed from the file.
+
+Older coarse groups remain (`monitoring`, `data_collection`, `alerts`, `users`, `administration`, `extensions`) and select everything under a prefix, writes included when they are not blocked. `ZABBIX_MCP_SERVER__DISABLED_TOOLS` is the denylist counterpart and accepts the same groups. To serve different audiences different catalogs, run one instance per audience.
 
 ## Common Parameters (get methods)
 

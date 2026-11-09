@@ -18,6 +18,7 @@
 """MCP server setup, lifespan management, and dynamic tool registration."""
 
 import asyncio
+import copy
 import base64
 import inspect
 import json
@@ -2871,6 +2872,42 @@ def _request_headers(ctx: Any) -> Any:
     return getattr(getattr(ctx, "request", None), "headers", None)
 
 
+def _warn_unknown_tool_entries(config: AppConfig) -> None:
+    """A misspelt TOOLS / DISABLED_TOOLS entry matches nothing and fails silently: say so."""
+    from zabbix_mcp.config import TOOL_GROUPS
+
+    known = {m.tool_name.rsplit("_", 1)[0] for m in ALL_METHODS} | set(TOOL_GROUPS["extensions"])
+    for label, entries in (("TOOLS", config.server.tools), ("DISABLED_TOOLS", config.server.disabled_tools)):
+        unknown = [e for e in entries or [] if e not in known]
+        if unknown:
+            logger.warning(
+                "ZABBIX_MCP_SERVER__%s: %s match no tool or group (a misspelt entry selects nothing). "
+                "Generated tools take a prefix such as 'host'; composite and extension tools the full "
+                "name such as 'host_status_get'.", label, ", ".join(unknown),
+            )
+
+
+def _strip_raw_json(tools: list) -> list:
+    """Leave ``raw_json`` out of the advertised schemas while it is refused anyway.
+
+    It costs ~600 characters on every tool; with ``ALLOW_RAW_JSON`` off any call
+    that sets it is rejected, so offering it only spends the model's context.
+    Tool objects are copied, never edited in place.
+    """
+    out = []
+    for tool in tools:
+        props = (tool.input_schema or {}).get("properties", {})
+        if "raw_json" not in props:
+            out.append(tool)
+            continue
+        schema = copy.deepcopy(tool.input_schema)
+        schema["properties"].pop("raw_json", None)
+        if "required" in schema:
+            schema["required"] = [r for r in schema["required"] if r != "raw_json"]
+        out.append(tool.model_copy(update={"input_schema": schema}))
+    return out
+
+
 def _install_user_token_context(mcp: MCPServer, config: AppConfig) -> list[str]:
     """Let servers that take the caller's own token read it from the request.
 
@@ -3163,6 +3200,8 @@ def run_server(
         result.tools = _annotate_tools_by_version(
             result.tools, client_manager,
         )
+        if not _RAW_JSON_ALLOWED:
+            result.tools = _strip_raw_json(result.tools)
         # 2026-07-28 CacheableResult freshness hint. The catalog only
         # changes on restart, so a few minutes of client-side caching
         # saves re-sending the whole schema set every session. Scope is
@@ -3208,6 +3247,7 @@ def run_server(
             logger.warning("Write tools ENABLED (not in the blocked list): %s", ", ".join(allowed))
         else:
             logger.info("No write tool is enabled: the server cannot change data in Zabbix")
+    _warn_unknown_tool_entries(config)
     if config.server.tools or config.server.disabled_tools:
         parts = []
         if config.server.tools:

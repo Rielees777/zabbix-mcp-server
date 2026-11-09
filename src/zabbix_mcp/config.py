@@ -624,6 +624,31 @@ TOOL_GROUPS: dict[str, list[str]] = {
     ],
 }
 
+# Task-oriented groups, meant to be combined: ZABBIX_MCP_SERVER__TOOLS=core,availability.
+# Entries follow the filter's rule: a prefix for generated tools ("host" = host_get, ...) and
+# the full name for the composite / extension tools. A group may list other groups.
+TASK_GROUPS: dict[str, list[str]] = {
+    # --- core: what a chat model needs to answer "how is it, what happened, when was the peak" ---
+    "status": [
+        "host", "hostgroup",
+        "host_status_get", "hostgroup_overview_get", "infrastructure_summary_get", "health_check",
+    ],
+    "problems": ["problem_active_get", "event", "trigger"],
+    "metrics": [
+        "item", "trend", "history", "item_history_summary_get",
+        "graph", "graphitem",   # find a graph, then the items it plots
+    ],
+    "audit": ["auditlog"],
+    "core": ["status", "problems", "metrics", "audit"],
+    # --- optional, switch on as users ask for it ---
+    "availability": ["sla", "maintenance"],        # SLA / SLI and maintenance windows
+    "notifications": ["alert"],                    # who was notified, and when
+    "analytics": ["item_threshold_search", "capacity_forecast", "anomaly_detect"],
+    "inventory": ["template", "hostinterface", "proxy", "httptest", "hanode", "housekeeping"],
+    "problems_raw": ["problem"],                   # low-level problem.get, heavy; problem_active_get covers most needs
+}
+TOOL_GROUPS.update(TASK_GROUPS)
+
 
 def _validate_timezone_setting(value: str) -> str:
     """Empty stays empty; anything else must be a zone ``timezones.validate_timezone`` accepts."""
@@ -667,13 +692,18 @@ def _validate_public_url(value: str, tls_cert_file: object) -> str:
     return value.rstrip("/")
 
 
-def _expand_tool_groups(tools: list[str]) -> list[str]:
-    """Expand group names (e.g. 'monitoring') into individual tool prefixes."""
+def _expand_tool_groups(tools: list[str], _path: tuple[str, ...] = ()) -> list[str]:
+    """Expand group names (e.g. 'core', 'monitoring') into tool prefixes and names.
+
+    A group may contain other groups; a group that contains itself is an error.
+    """
     expanded: list[str] = []
     for entry in tools:
         entry = entry.lower()
         if entry in TOOL_GROUPS:
-            expanded.extend(TOOL_GROUPS[entry])
+            if entry in _path:
+                raise ValueError(f"tool group '{entry}' contains itself ({' -> '.join(_path + (entry,))})")
+            expanded.extend(_expand_tool_groups(TOOL_GROUPS[entry], _path + (entry,)))
         else:
             expanded.append(entry)
     return list(dict.fromkeys(expanded))  # deduplicate, preserve order

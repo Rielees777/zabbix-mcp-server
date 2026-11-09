@@ -10,6 +10,9 @@ The environment-only release. The server is now configured entirely through `ZAB
 
 - **Per-user Zabbix tokens.** A Zabbix server can be configured with `ZABBIX_MCP_ZABBIX_SERVERS__<NAME>__TOKEN_HEADER=X-MCP-Token-UT` instead of `API_TOKEN`: every request is made with the Zabbix token it carries in that header (one header per server, so two servers take two tokens), and a request without it is rejected. The token follows each request, not the MCP session; connections are kept per token (bounded), rate limiting is per token, versions are read without a token. Service-token and per-user servers can be mixed. Covered by unit tests and by an end-to-end test against a fake Zabbix in both protocol generations.
 
+- **Task-oriented tool groups** for `ZABBIX_MCP_SERVER__TOOLS` / `DISABLED_TOOLS`: `core` (= `status` + `problems` + `metrics` + `audit`, 16 tools, ~16k tokens) and the optional `availability`, `notifications`, `analytics`, `inventory`, `problems_raw`. Groups combine (`core,availability`) and may contain groups. A misspelt entry is now named in the start-up log instead of silently selecting nothing. The Helm values select `core`.
+- **`raw_json` is no longer advertised while it is refused**: it was ~600 characters on every tool (~11k tokens of the 66-tool catalog) and any call that set it was rejected anyway. It reappears with `ZABBIX_MCP_SERVER__ALLOW_RAW_JSON=true`.
+
 ### Fixed
 
 - **`action_prepare` / `action_confirm` could reach the user methods** (`user.*`, `usergroup.*`, ...) that `zabbix_raw_api_call` already refused, because they take any method name. They now apply the same checks, and `action_confirm` repeats them.
