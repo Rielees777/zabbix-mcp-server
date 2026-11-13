@@ -26,7 +26,8 @@ emptyDir:
     mountPath: /tmp
 
 # Same layout as netbox-mcp. Nothing here is secret: in per_request_token mode every user
-# sends their own Zabbix tokens (X-MCP-Token-UT, X-MCP-Token-UTS) through the gateway.
+# sends their own Zabbix tokens through the gateway. Higress decrypts X-MCP-Token only, so
+# both servers read that header; it carries "ut=<token>;uts=<token>" (encrypted as one value).
 env:
   CI_COMMIT_SHORT_SHA: ""
   ZABBIX_MCP_SERVER__TRANSPORT: "http"
@@ -38,9 +39,9 @@ env:
   # Tool groups (README, "Token Budget"); core = 16 tools.
   ZABBIX_MCP_SERVER__TOOLS: "core,availability,notifications,analytics,inventory,problems_raw"
   ZABBIX_MCP_ZABBIX_SERVERS__UT__URL: "https://zabbix-ut.sovcombank.group"
-  ZABBIX_MCP_ZABBIX_SERVERS__UT__TOKEN_HEADER: "X-MCP-Token-UT"
+  ZABBIX_MCP_ZABBIX_SERVERS__UT__TOKEN_HEADER: "X-MCP-Token"
   ZABBIX_MCP_ZABBIX_SERVERS__UTS__URL: "https://uhq-zbx-uts-web1.sovcombank.group"
-  ZABBIX_MCP_ZABBIX_SERVERS__UTS__TOKEN_HEADER: "X-MCP-Token-UTS"
+  ZABBIX_MCP_ZABBIX_SERVERS__UTS__TOKEN_HEADER: "X-MCP-Token"
 
 service:
   zabbix-mcp-server:

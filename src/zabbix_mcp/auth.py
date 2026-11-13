@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import re
 import hmac
 import time
 from datetime import datetime, timezone
@@ -52,6 +53,34 @@ current_request_base: contextvars.ContextVar[str | None] = contextvars.ContextVa
 # the headers some Zabbix server is configured to read are kept. None outside a request.
 current_user_tokens: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "current_user_tokens", default=None)
+
+
+# "ut=<token>;uts=<token>": several servers' tokens in ONE header, for a gateway that
+# can decrypt a single header only (Higress Token Unseal on X-MCP-Token). Values cannot
+# contain "=", ";" or "," - Zabbix API tokens are hex - so a padded base64 value is never
+# mistaken for this form.
+_KEYED_TOKENS_RE = re.compile(
+    r"\s*[A-Za-z0-9_-]+\s*=\s*[^;,=\s]+(\s*[;,]\s*[A-Za-z0-9_-]+\s*=\s*[^;,=\s]+)*\s*[;,]?\s*"
+)
+
+
+def split_keyed_tokens(raw: str) -> dict[str, str] | None:
+    """``"ut=AAA; uts=BBB"`` -> ``{"ut": "AAA", "uts": "BBB"}``; None if *raw* is a plain token.
+
+    Keys are lower-cased. A key given twice raises ValueError (never pick one silently).
+    """
+    if not _KEYED_TOKENS_RE.fullmatch(raw):
+        return None
+    pairs: dict[str, str] = {}
+    for part in re.split(r"[;,]", raw):
+        if not part.strip():
+            continue
+        key, _, value = part.partition("=")
+        key = key.strip().lower()
+        if key in pairs:
+            raise ValueError(f"the key '{key}' appears more than once")
+        pairs[key] = value.strip()
+    return pairs
 
 
 def token_fingerprint(token: str) -> str:

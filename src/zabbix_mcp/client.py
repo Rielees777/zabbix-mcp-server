@@ -100,7 +100,7 @@ try:
 except Exception:
     pass
 
-from zabbix_mcp.auth import current_user_tokens, token_fingerprint
+from zabbix_mcp.auth import current_user_tokens, split_keyed_tokens, token_fingerprint
 from zabbix_mcp.config import AppConfig, ZabbixServerConfig
 
 logger = logging.getLogger("zabbix_mcp.client")
@@ -251,13 +251,38 @@ class ClientManager:
         header = getattr(srv, "token_header", None)
         if not header:
             return name, None
-        token = ((current_user_tokens.get() or {}).get(header) or "").strip()
-        if not token:
+        raw = ((current_user_tokens.get() or {}).get(header) or "").strip()
+        if not raw:
             raise MissingTokenError(
                 f"Server '{name}' needs your own Zabbix API token in the '{header}' request "
                 f"header, and the request did not carry one."
             )
+        token = self._token_from_header(name, srv, header, raw)
         return f"{name}{_KEY_SEP}{token_fingerprint(token)}", token
+
+    def _token_from_header(self, name: str, srv: ZabbixServerConfig, header: str, raw: str) -> str:
+        """This server's token out of the header value: plain, or ``key=token;key=token``."""
+        sharing = sorted(n for n, s in self._config.zabbix_servers.items() if s.token_header == header)
+        key = srv.effective_token_key
+        example = ";".join(f"{self._config.zabbix_servers[n].effective_token_key}=<token>" for n in sharing)
+        try:
+            pairs = split_keyed_tokens(raw)
+        except ValueError as exc:
+            raise MissingTokenError(f"The '{header}' header is malformed: {exc}. Expected {example}.") from None
+        if pairs is None:
+            if len(sharing) > 1:
+                raise MissingTokenError(
+                    f"The '{header}' header carries one token, but servers {', '.join(sharing)} share it: "
+                    f"send {example}."
+                )
+            return raw
+        token = pairs.get(key, "")
+        if not token:
+            raise MissingTokenError(
+                f"Server '{name}' takes its token from the '{header}' header under the key '{key}', "
+                f"and the header has none (expected {example})."
+            )
+        return token
 
     def effective_token(self, name: str) -> str:
         """The Zabbix API token the current call uses on *name* (service or caller's)."""

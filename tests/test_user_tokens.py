@@ -128,14 +128,17 @@ class TestConfig(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(ValidationError):
                 ZabbixServerConfig(name="a", url="http://z", token_header=bad)
 
-    def test_two_servers_cannot_share_a_header(self):
+    def test_two_servers_may_share_a_header_but_not_a_key(self):
         env = {
             "ZABBIX_MCP_ZABBIX_SERVERS__A__URL": "http://a", "ZABBIX_MCP_ZABBIX_SERVERS__A__TOKEN_HEADER": "X-T",
             "ZABBIX_MCP_ZABBIX_SERVERS__B__URL": "http://b", "ZABBIX_MCP_ZABBIX_SERVERS__B__TOKEN_HEADER": "x-t",
         }
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(sorted(load_config().zabbix_servers), ["a", "b"])
+        env["ZABBIX_MCP_ZABBIX_SERVERS__B__TOKEN_KEY"] = "A"
         with patch.dict(os.environ, env, clear=True), self.assertRaises(ConfigError) as ctx:
             load_config()
-        self.assertIn("same header", str(ctx.exception))
+        self.assertIn("TOKEN_KEY", str(ctx.exception))
 
     def test_environment_loading(self):
         env = {

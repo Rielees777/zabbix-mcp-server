@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.3 - 2026-11-13
+
+- **One gateway header for both Zabbix servers.** The MCP is published as one route and Higress decrypts only `X-MCP-Token`, so several servers may now share a `TOKEN_HEADER`: its value carries `ut=<token>;uts=<token>` (the user encrypts the whole string) and each server takes the token under its key (server name or `TOKEN_KEY`). A missing key, a plain token in a shared header and a repeated key are refused with a message showing the expected form; a header used by one server still accepts a plain token. The Helm values point both servers at `X-MCP-Token`.
+
 ## v2.2 - 2026-11-13
 
 Build, deployment and request handling aligned with netbox-mcp, which already runs behind the gateway.

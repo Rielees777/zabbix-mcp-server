@@ -77,6 +77,7 @@ A server whose settings are invalid is skipped with a warning (and listed by `he
 | `URL` | Zabbix frontend URL, `http://` or `https://` (required) |
 | `API_TOKEN` | Service Zabbix API token (required, except with `TOKEN_HEADER` or `LEGACY_AUTH`) |
 | `TOKEN_HEADER` | Per-user tokens: name of the request header that carries the caller's own Zabbix API token for this server, see [Per-user Zabbix tokens](#per-user-zabbix-tokens). Replaces `API_TOKEN` |
+| `TOKEN_KEY` | Key of this server's token when several servers share a `TOKEN_HEADER` (`ut=<token>;uts=<token>`); default: the server name |
 | `READ_ONLY` | Block write operations (default `true`) |
 | `VERIFY_SSL` | Verify the TLS certificate (default `true`) |
 | `SKIP_VERSION_CHECK` | Skip the zabbix-utils version check (default `false`) |
@@ -120,7 +121,7 @@ The client then sends the header(s) with its requests (here through the gateway)
 }
 ```
 
-- **Each server has its own header**; two servers cannot share one. A server without `TOKEN_HEADER` keeps using its `API_TOKEN`, so the modes can be mixed.
+- **Each server has its own header, or several share one.** When servers share a header (a gateway that decrypts only one, such as Higress Token Unseal on `X-MCP-Token`), its value carries every token under a key: `ut=<token>;uts=<token>` (`;` or `,` between pairs). The key is the server name, or `TOKEN_KEY`. A server whose key is missing is refused with a message showing the expected form; a plain token in a shared header is refused as ambiguous; a key given twice is an error. Encrypt the whole string as one value for the gateway. A server without `TOKEN_HEADER` keeps using its `API_TOKEN`, so the modes can be mixed.
 - **A request without the header is rejected** with a message naming the header; nothing is sent to Zabbix and there is no fallback to another identity.
 - The token is read from **the request being served**, not from the one that opened the MCP session, so a client can change it between calls.
 - The server keeps one Zabbix connection per token (at most 256, oldest dropped) and a rate-limit budget per token. Tokens are never logged; only a short hash is used internally.
@@ -140,7 +141,7 @@ ZABBIX_MCP_SERVER__ALLOWED_REQUEST_BY=personal        # comma separated; default
 ZABBIX_MCP_SERVER__REQUEST_BY_HEADER=X-Request-By     # default
 ```
 
-- At least one of the servers' token headers (`X-MCP-Token-UT`, `X-MCP-Token-UTS`) must be present and non-empty, as `netbox-mcp` requires its `X-MCP-Token`; a request without any credential gets `401`.
+- A token header of the configured servers (in the published deployment `X-MCP-Token`) must be present and non-empty, as `netbox-mcp` requires its `X-MCP-Token`; a request without any credential gets `401`.
 - The server runs **without MCP sessions** (`stateless_http`), so a token can never be bound to a session and reused by another request.
 - Unsafe production settings are refused at start-up: `transport=stdio`, `log_level=debug`, `verify_ssl=false` on any Zabbix server.
 - Every response carries hardening headers (`X-Content-Type-Options`, `X-Frame-Options`, `Content-Security-Policy: default-src 'none'`, HSTS, `Referrer-Policy`), and every tool call writes an audit record to the `zabbix_mcp.audit` logger: tool, server, argument names (never values), the declared principal, a correlation id, outcome and duration. Tokens are never logged.
@@ -270,7 +271,17 @@ Build and deployment follow `netbox-mcp`, the MCP service of the same group that
 | [`requirements.txt`](requirements.txt) | Exact versions for the image, inside the ranges of `pyproject.toml` (a test checks it); `requirements-dev.txt` adds pytest |
 | [`helm/values-prod.yaml`](helm/values-prod.yaml), [`helm/values-test.yaml`](helm/values-test.yaml) | Deployment on port 8000, read-only root filesystem with `/tmp` as `emptyDir`, Service, Ingress on `/` of its own host |
 
-In the Helm values everything is plain configuration: `AUTH_MODE=per_request_token`, the two Zabbix servers with their URL and `TOKEN_HEADER`, the tool groups. **There is no Zabbix secret to store**: each user sends their own tokens through the gateway (`X-MCP-Token-UT`, `X-MCP-Token-UTS`). Remove `..._API_TOKEN` keys of these servers and any `ZABBIX_USER` / `ZABBIX_PASSWORD` / `ZABBIX_TOKEN` from the Vault path: a server with both `TOKEN_HEADER` and `API_TOKEN` is rejected as misconfigured.
+In the Helm values everything is plain configuration: `AUTH_MODE=per_request_token`, the two Zabbix servers with their URL and `TOKEN_HEADER`, the tool groups. **There is no Zabbix secret to store**: each user sends their own tokens through the gateway. The route is published as one MCP and Higress decrypts only `X-MCP-Token`, so both servers read that header and the user puts both tokens in it, encrypted together:
+
+```json
+"headers": {
+  "X-Request-By": "personal",
+  "X-MCP-Token": "<encrypted: ut=<token on zabbix-ut>;uts=<token on zabbix-uts>>",
+  "X-MCP-Request-Principal": "<login>"
+}
+```
+
+With a token for one server only, send just that pair (`uts=<token>`); calls to the other server are then refused. Remove `..._API_TOKEN` keys of these servers and any `ZABBIX_USER` / `ZABBIX_PASSWORD` / `ZABBIX_TOKEN` from the Vault path: a server with both `TOKEN_HEADER` and `API_TOKEN` is rejected as misconfigured.
 
 `PUBLIC_URL` is not set, as in netbox-mcp: the pod is only reached through the Ingress and the gateway, and the Host check it would enable answers `421` to any other `Host` the gateway sends. Settings are read once at start-up; change them by redeploying.
 

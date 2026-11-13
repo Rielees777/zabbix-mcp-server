@@ -124,6 +124,10 @@ class ZabbixServerConfig(_Frozen):
     # with the token it brings and a request without the header is rejected; api_token
     # must stay empty. Unset = the service api_token below is used.
     token_header: str | None = None
+    # When several servers share one token header (a gateway that decrypts only
+    # X-MCP-Token), the header carries "ut=<token>;uts=<token>" and this server takes
+    # the token under this key. Default: the server name.
+    token_key: str | None = None
     username: str = ""
     password: SecretStr = SecretStr("")
     # Optional username + password used by ``graph_render`` to acquire a
@@ -184,6 +188,21 @@ class ZabbixServerConfig(_Frozen):
         if name in _RESERVED_HEADERS:
             raise ValueError(f"token_header '{value}' is reserved; pick a dedicated header such as X-MCP-Token-UT")
         return name
+
+    @field_validator("token_key", mode="before")
+    @classmethod
+    def _check_token_key(cls, value: Any) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        key = str(value).strip().lower()
+        import re
+        if not re.fullmatch(r"[a-z0-9_-]{1,64}", key):
+            raise ValueError(f"token_key '{value}' may only contain letters, digits, '_' and '-'")
+        return key
+
+    @property
+    def effective_token_key(self) -> str:
+        return self.token_key or self.name.lower()
 
     @model_validator(mode="after")
     def _check_credentials(self) -> "ZabbixServerConfig":
@@ -602,15 +621,18 @@ class AppConfig(BaseSettings):
                     "auth_mode=per_request_token does not allow verify_ssl=false (users' tokens travel "
                     f"to Zabbix); fix: {', '.join(unverified)}"
                 )
-        seen: dict[str, str] = {}
+        # Servers may share a token header (then it carries "key=token;key=token"), but
+        # within one header every server needs its own key.
+        seen: dict[tuple[str, str], str] = {}
         for name, srv_cfg in good.items():
             if srv_cfg.token_header:
-                if srv_cfg.token_header in seen:
+                slot = (srv_cfg.token_header, srv_cfg.effective_token_key)
+                if slot in seen:
                     raise ValueError(
-                        f"servers '{seen[srv_cfg.token_header]}' and '{name}' read their token from the "
-                        f"same header '{srv_cfg.token_header}'; each server needs its own header"
+                        f"servers '{seen[slot]}' and '{name}' read the token '{slot[1]}' from the same "
+                        f"header '{slot[0]}'; give one of them another TOKEN_KEY"
                     )
-                seen[srv_cfg.token_header] = name
+                seen[slot] = name
         ordered = sorted(good)
         if wanted is not None:
             ordered.remove(wanted)
