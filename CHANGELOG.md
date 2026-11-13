@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.1 - 2026-11-13
+
+First release to run behind the gateway. It contains everything listed under v2.0 below (the environment-only configuration) plus: per-user Zabbix tokens read from request headers, tool groups (`core`, ...) and the hidden `raw_json`, the `X-Request-By` request gate, and the fixes that make the server start behind it (a failed application lifespan is now fatal and logged, stray `ZABBIX_*` variables are ignored). The first line of the log shows the version: `Zabbix MCP Server v2.1`.
+
 ## v2.0 - 2026-10-20
 
 The environment-only release. The server is now configured entirely through `ZABBIX_MCP_*` environment variables, validated with pydantic-settings, and runs without the admin portal. **This is a breaking release: read "Migrating" before upgrading.**
