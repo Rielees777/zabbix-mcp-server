@@ -3472,12 +3472,16 @@ def run_server(
             if transport == "http":
                 # Per-request tokens: no sessions, so a caller's token can never be bound to a
                 # session and reused by another request (the same choice as netbox-mcp).
+                # host: the SDK turns on a localhost-only Host check when it believes it is
+                # bound to 127.0.0.1 (its default) and no transport_security is given. In a
+                # pod bound to 0.0.0.0 that answered "Invalid Host header" (421) to the gateway.
                 asgi_app = mcp.streamable_http_app(
                     transport_security=transport_security,
                     stateless_http=config.server.auth_mode == "per_request_token",
+                    host=host,
                 )
             else:
-                asgi_app = mcp.sse_app()
+                asgi_app = mcp.sse_app(transport_security=transport_security, host=host)
 
             # Spawn the periodic task-store cleanup as a background task
             # tied to Starlette lifespan. Ensures expired tasks (and their

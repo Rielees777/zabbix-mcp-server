@@ -1,5 +1,9 @@
 # Changelog
 
+## v2.3.1 - 2026-11-13
+
+- **Fixed: `421 Invalid Host header` behind the gateway.** Without `PUBLIC_URL` the server passed no bind address to the MCP SDK, which then assumed `127.0.0.1` and allowed only localhost `Host` values, so a pod bound to `0.0.0.0` refused every request the gateway forwarded. The bind address is now passed on (`streamable_http_app` and `sse_app`); a test sends the gateway's `Host` to a server bound like the pod.
+
 ## v2.3 - 2026-11-13
 
 - **One gateway header for both Zabbix servers.** The MCP is published as one route and Higress decrypts only `X-MCP-Token`, so several servers may now share a `TOKEN_HEADER`: its value carries `ut=<token>;uts=<token>` (the user encrypts the whole string) and each server takes the token under its key (server name or `TOKEN_KEY`). A missing key, a plain token in a shared header and a repeated key are refused with a message showing the expected form; a header used by one server still accepts a plain token. The Helm values point both servers at `X-MCP-Token`.

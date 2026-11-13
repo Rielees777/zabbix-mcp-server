@@ -288,6 +288,7 @@ class TestGatedServerOverHttp(unittest.TestCase):
         env = {
             **os.environ,
             "ZABBIX_MCP_SERVER__TRANSPORT": "http", "ZABBIX_MCP_SERVER__PORT": str(port),
+            "ZABBIX_MCP_SERVER__HOST": "0.0.0.0",      # as in the pod: no PUBLIC_URL, any Host
             "ZABBIX_MCP_SERVER__AUTH_MODE": "per_request_token",
             "ZABBIX_MCP_SERVER__TOOLS": "core",
             "ZABBIX_MCP_ZABBIX_SERVERS__UT__URL": cls.zbx.url,
@@ -334,6 +335,14 @@ class TestGatedServerOverHttp(unittest.TestCase):
         self.assertEqual(_post(f"{self.base}/mcp", {"X-Request-By": "intruder", **TOKEN}), 401)
         self.assertEqual(_post(f"{self.base}/mcp", {"X-Request-By": "personal"}), 401)
         self.assertEqual(_post(f"{self.base}/mcp", {"X-Request-By": "personal", **TOKEN}), 200)
+
+    def test_the_gateways_host_header_is_accepted(self):
+        """The 421 in the pod: bound to 0.0.0.0 without PUBLIC_URL, the SDK still allowed localhost only."""
+        for host in ("zbx-mcp.sovcombank.group", "zabbix-mcp-server.ns.svc:8000", "ai-gateway-prod.sovcombank.group"):
+            with self.subTest(host=host):
+                self.assertEqual(_post(f"{self.base}/mcp", {"X-Request-By": "personal", "Host": host, **TOKEN}), 200)
+        self._log.flush()
+        self.assertNotIn("Invalid Host header", self._log_path.read_text())
 
     def test_stateless_no_session_is_minted(self):
         status, hdrs, _ = _post(f"{self.base}/mcp", {"X-Request-By": "personal", **TOKEN}, full=True)
