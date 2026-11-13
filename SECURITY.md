@@ -43,6 +43,11 @@ No tool reads or changes Zabbix users, user groups, user directories, roles, API
 - Header values are credentials: use TLS on every hop and keep them out of gateway and proxy logs. Two servers cannot read the same header; the reserved headers (`Authorization`, `Cookie`, `Host`, ...) are refused
 - Not available over stdio
 
+### Request Gate
+
+- `AUTH_MODE=per_request_token` answers every HTTP request without an allowed `X-Request-By` value (default `personal`) with 401; `/health` and `/reports/` are exempt, the application start-up is never judged, websockets are refused
+- The marker is **not authentication**: any client that can reach the server can send it. Limit who can reach the server (gateway-only NetworkPolicy, `ALLOWED_HOSTS`, the MCP bearer `AUTH_TOKEN`) - the start-up log warns when no bearer is set on a non-local bind
+
 ### Zabbix Credentials
 
 Zabbix API tokens inherit the permissions of their Zabbix user - use a dedicated, least-privilege user per server.

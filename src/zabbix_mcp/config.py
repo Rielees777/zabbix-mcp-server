@@ -273,6 +273,16 @@ class ServerConfig(_Frozen):
     allow_raw_json: bool = False
     # Default zone for every Zabbix entry that has none of its own.
     timezone: str = ""
+    # "service": servers use their service API token unless they have a TOKEN_HEADER.
+    # "per_request_token": every Zabbix server takes the caller's own token from a request
+    # header (TOKEN_HEADER on every server is required) and the request gate below is on.
+    auth_mode: Literal["service", "per_request_token"] = "service"
+    # Request gate, active with auth_mode=per_request_token: a request must carry
+    # ``request_by_header`` with one of these values, or it gets HTTP 401. It is a marker
+    # that the request came through the gateway, NOT authentication: anybody who can reach
+    # the server can send it. /health and /reports/ are exempt.
+    allowed_request_by: EnvList = Field(default_factory=lambda: ["personal"])
+    request_by_header: str = "X-Request-By"
     # Zabbix server used when a call names none. Empty = the first one in
     # alphabetical order (the order of environment variables is not stable).
     default_server: str | None = None
@@ -288,6 +298,21 @@ class ServerConfig(_Frozen):
     @classmethod
     def _split(cls, value: Any) -> Any:
         return _csv(value)
+
+    @field_validator("allowed_request_by", mode="before")
+    @classmethod
+    def _request_by_values(cls, value: Any) -> Any:
+        value = _csv(value)
+        return value or ["personal"]       # an empty list would lock everybody out
+
+    @field_validator("request_by_header", mode="before")
+    @classmethod
+    def _request_by_header_name(cls, value: Any) -> Any:
+        import re
+        name = str(value or "X-Request-By").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}", name):
+            raise ValueError(f"request_by_header '{value}' is not a valid HTTP header name")
+        return name
 
     @field_validator("default_server", mode="before")
     @classmethod
@@ -549,6 +574,15 @@ class AppConfig(BaseSettings):
                 f"{', '.join(sorted(good)) or 'none'}"
                 + (f"; skipped: {', '.join(sorted(skipped))}" if skipped else "") + ")"
             )
+        server = data.get("server")
+        mode = server.get("auth_mode") if isinstance(server, dict) else getattr(server, "auth_mode", None)
+        if str(mode or "service").strip().lower() == "per_request_token":
+            plain = sorted(n for n, c in good.items() if not c.token_header)
+            if plain:
+                raise ValueError(
+                    "auth_mode=per_request_token needs every Zabbix server to read the caller's token "
+                    f"from a header; set TOKEN_HEADER for: {', '.join(plain)}"
+                )
         seen: dict[str, str] = {}
         for name, srv_cfg in good.items():
             if srv_cfg.token_header:

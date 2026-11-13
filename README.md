@@ -130,6 +130,20 @@ The client then sends the header(s) with its requests (here through the gateway)
 - The header values are credentials: they must only travel over TLS (gateway to server included), and the gateway must not log them.
 - `Authorization: Bearer` stays separate. It is the optional MCP bearer (`ZABBIX_MCP_SERVER__AUTH_TOKEN`), not a Zabbix token.
 
+#### Request gate (`X-Request-By`)
+
+With `ZABBIX_MCP_SERVER__AUTH_MODE=per_request_token` every Zabbix server must have a `TOKEN_HEADER` (otherwise the server refuses to start) and an HTTP request to the server must carry a marker header, or it is answered with `401` before anything else runs:
+
+```bash
+ZABBIX_MCP_SERVER__AUTH_MODE=per_request_token
+ZABBIX_MCP_SERVER__ALLOWED_REQUEST_BY=personal        # comma separated; default "personal"
+ZABBIX_MCP_SERVER__REQUEST_BY_HEADER=X-Request-By     # default
+```
+
+- The header **name** is case-insensitive, the **value** must match exactly.
+- `/health` and `/reports/` (report links people open in a browser) are exempt; only HTTP requests are judged, never the application's start-up, and websockets are refused (MCP does not use them).
+- **It is a marker, not authentication.** It says "this came through the gateway"; anybody who can reach the server can send it. Keep the server reachable only from the gateway (a NetworkPolicy, `ALLOWED_HOSTS` with the gateway's address) or have the gateway add the MCP bearer (`AUTH_TOKEN`). The start-up log says "Request gate ON".
+
 #### Legacy auth (Zabbix 5.0 and 5.2 only)
 
 > **Read this before enabling it.** Zabbix 5.0 and 5.2 are **out of upstream support** and have **no API tokens** - they were introduced in 5.4. The only way in is a username and password, which means this server holds a **user password** instead of a revocable, scoped token. That is a security risk you are choosing to carry, and this path is **best effort**: it is not in our test matrix. The right fix is upgrading Zabbix.
@@ -153,6 +167,8 @@ ZABBIX_MCP_ZABBIX_SERVERS__OLD__PASSWORD=...               # from Vault, never c
 | Variable (after `ZABBIX_MCP_SERVER__`) | Description |
 |---|---|
 | `TRANSPORT` | `stdio` (default), `http` (recommended) or `sse` |
+| `AUTH_MODE` | `service` (default) or `per_request_token`: every Zabbix server takes the caller's token from its `TOKEN_HEADER` and the request gate is on, see [Request gate](#request-gate-x-request-by) |
+| `ALLOWED_REQUEST_BY`, `REQUEST_BY_HEADER` | Gate values (default `personal`) and header name (default `X-Request-By`) |
 | `DEFAULT_SERVER` | Zabbix server used when a call names none (default: first in alphabetical order) |
 | `HOST`, `PORT` | HTTP bind address and port (default `127.0.0.1:8080`) |
 | `AUTH_TOKEN` | Bearer token MCP clients must send, see [Authentication](#authentication-of-mcp-clients) |

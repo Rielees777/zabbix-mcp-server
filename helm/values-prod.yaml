@@ -24,6 +24,10 @@ readOnlyRootFilesystem: "false"
 #   ZABBIX_MCP_SERVER__AUTH_TOKEN               - bearer-токен для MCP-клиентов
 #   ZABBIX_MCP_SERVER__AUTH_TOKEN_EXPIRES_AT    - (необязательно) срок действия токена, ISO 8601
 # Порт и режим сервера (transport=http, host=0.0.0.0, port=30030) заданы в ci-cd-files/Dockerfile.
+# Режим «токен в каждом запросе» с проверкой метки шлюза X-Request-By (без метки запрос получает 401;
+# /health открыт). Это метка, а не аутентификация: доступ к сервису должен быть только у шлюза.
+#   ZABBIX_MCP_SERVER__AUTH_MODE: "per_request_token"
+#   ZABBIX_MCP_SERVER__ALLOWED_REQUEST_BY: "personal"
 # Если у каждого пользователя свой токен Zabbix (не из Vault), вместо API_TOKEN для сервера задаётся
 # имя заголовка запроса, в котором клиент присылает свой токен (значения URL и имя заголовка не секретны):
 #   ZABBIX_MCP_ZABBIX_SERVERS__<ИМЯ>__URL: "https://..."

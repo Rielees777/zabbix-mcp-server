@@ -13,6 +13,8 @@ The environment-only release. The server is now configured entirely through `ZAB
 - **Task-oriented tool groups** for `ZABBIX_MCP_SERVER__TOOLS` / `DISABLED_TOOLS`: `core` (= `status` + `problems` + `metrics` + `audit`, 16 tools, ~16k tokens) and the optional `availability`, `notifications`, `analytics`, `inventory`, `problems_raw`. Groups combine (`core,availability`) and may contain groups. A misspelt entry is now named in the start-up log instead of silently selecting nothing. The Helm values select `core`.
 - **`raw_json` is no longer advertised while it is refused**: it was ~600 characters on every tool (~11k tokens of the 66-tool catalog) and any call that set it was rejected anyway. It reappears with `ZABBIX_MCP_SERVER__ALLOW_RAW_JSON=true`.
 
+- **Request gate** (`ZABBIX_MCP_SERVER__AUTH_MODE=per_request_token`, `ALLOWED_REQUEST_BY`, `REQUEST_BY_HEADER`): requests without an allowed `X-Request-By` value get 401. Every Zabbix server must then have a `TOKEN_HEADER`. Ported from a deployment's own middleware with three fixes: the application start-up (lifespan) is passed through instead of being answered with a 401, which had stopped the MCP session manager from starting; `/health` and `/reports/` are exempt; websockets are refused. Covered by unit tests and by a real server started in this mode.
+
 ### Fixed
 
 - **`action_prepare` / `action_confirm` could reach the user methods** (`user.*`, `usergroup.*`, ...) that `zabbix_raw_api_call` already refused, because they take any method name. They now apply the same checks, and `action_confirm` repeats them.

@@ -1271,12 +1271,26 @@ def _forwarded_base_from_headers(headers: dict[bytes, bytes]) -> str | None:
     return f"{proto}://{host}"
 
 
-def _make_request_context_middleware(inner_app, trusted_proxies: list[str]):
+# Paths the request gate never blocks: probes, and the capability links to generated
+# reports that a person opens in a browser (see the report download route).
+_GATE_EXEMPT_PATHS = ("/health",)
+_GATE_EXEMPT_PREFIXES = ("/reports/",)
+
+
+def _make_request_context_middleware(inner_app, trusted_proxies: list[str], config=None):
     """ASGI middleware publishing per-request context to the tool handlers.
 
     Sets two context variables consumed further down: the client IP (for
     token IP allowlists) and, when a trusted proxy declared one, the
     public base URL for report download links.
+
+    With ``config.server.auth_mode == "per_request_token"`` it is also the
+    request gate: an HTTP request whose ``request_by_header`` (default
+    ``X-Request-By``) is not one of ``allowed_request_by`` is answered with 401
+    before anything else runs. Only HTTP requests are judged. Lifespan (app
+    start / stop) carries no headers and must never get an HTTP response, and
+    ``/health`` and ``/reports/`` stay open. The marker only says "came through
+    the gateway"; it is not authentication.
 
     ``trusted_proxies`` entries are parsed as addresses or networks, so
     ``10.0.0.0/24`` and any spelling of an IPv6 address match the peer.
@@ -1313,7 +1327,35 @@ def _make_request_context_middleware(inner_app, trusted_proxies: list[str]):
             return False
         return any(parsed in net for net in nets)
 
+    gate_on = config is not None and getattr(config.server, "auth_mode", "service") == "per_request_token"
+    gate_header = (getattr(config.server, "request_by_header", "X-Request-By") if gate_on else "").lower()
+    gate_values = set(getattr(config.server, "allowed_request_by", None) or ["personal"]) if gate_on else set()
+
     async def _middleware(scope, receive, send):
+        if scope["type"] == "lifespan":
+            # App start / stop: no headers, and an HTTP response here would crash uvicorn's
+            # lifespan task (the MCP session manager would then never start).
+            await inner_app(scope, receive, send)
+            return
+        if gate_on and scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})   # MCP does not use websockets
+            return
+        if gate_on and scope["type"] == "http":
+            path = scope.get("path", "")
+            if path not in _GATE_EXEMPT_PATHS and not path.startswith(_GATE_EXEMPT_PREFIXES):
+                sent = None
+                for key, value in scope.get("headers", []):
+                    if key.decode("latin-1").lower() == gate_header:
+                        sent = value.decode("latin-1")
+                        break
+                if sent not in gate_values:
+                    from starlette.responses import JSONResponse
+                    await JSONResponse(
+                        {"detail": f"missing or invalid {config.server.request_by_header} header"},
+                        status_code=401,
+                        headers={"WWW-Authenticate": 'MCP-Token realm="zabbix-mcp-server"'},
+                    )(scope, receive, send)
+                    return
         peer = None
         base = None
         if scope["type"] in ("http", "websocket"):
@@ -3380,7 +3422,14 @@ def run_server(
             # otherwise the raw TCP peer is used so an untrusted client
             # cannot impersonate an arbitrary IP via XFF.
             asgi_app = _make_request_context_middleware(
-                asgi_app, config.server.trusted_proxies or [])
+                asgi_app, config.server.trusted_proxies or [], config)
+            if config.server.auth_mode == "per_request_token":
+                logger.info(
+                    "Request gate ON (auth_mode=per_request_token): '%s' must be one of %s; "
+                    "/health and /reports/ are exempt. This is a marker, not authentication - "
+                    "restrict who can reach the server (gateway-only NetworkPolicy, ALLOWED_HOSTS, AUTH_TOKEN).",
+                    config.server.request_by_header, ", ".join(config.server.allowed_request_by),
+                )
 
             # Apply IP allowlist middleware if configured
             if config.server.allowed_hosts:
