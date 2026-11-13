@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import ssl
 import threading
@@ -156,6 +157,26 @@ class _RateLimiter:
             self._buckets[key] = calls
 
 
+# zabbix_utils.ZabbixAPI falls back to these variables of the PROCESS environment for any
+# credential it is not handed, and logs in at construction. A stray ZABBIX_PASSWORD (or a
+# TOKEN of another system) in the pod would make every connection fail with "Username is
+# missing", or authenticate as somebody else. This server takes ZABBIX_MCP_* settings only.
+_ZABBIX_UTILS_ENV = ("ZABBIX_URL", "ZABBIX_USER", "ZABBIX_PASSWORD", "ZABBIX_TOKEN")
+
+
+def _ignore_zabbix_utils_environment() -> None:
+    found = [name for name in _ZABBIX_UTILS_ENV if name in os.environ]
+    if not found:
+        return
+    for name in found:
+        del os.environ[name]
+    logger.warning(
+        "Ignoring the environment variable(s) %s: zabbix_utils would use them as credentials for every "
+        "connection. Configure Zabbix through ZABBIX_MCP_ZABBIX_SERVERS__<NAME>__... only.",
+        ", ".join(found),
+    )
+
+
 class MissingTokenError(ValueError):
     """A server that takes the caller's own token was called without one."""
 
@@ -177,6 +198,7 @@ class ClientManager:
     """
 
     def __init__(self, config: AppConfig) -> None:
+        _ignore_zabbix_utils_environment()
         self._config = config
         # Service-token servers: one client per server name. Per-user-token
         # servers: one client per (server, token fingerprint), bounded below.

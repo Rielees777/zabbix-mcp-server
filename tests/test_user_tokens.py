@@ -213,6 +213,32 @@ class TestClientManager(unittest.TestCase):
         finally:
             current_user_tokens.reset(reset)
 
+    def test_stray_zabbix_utils_environment_is_ignored(self):
+        """ZABBIX_PASSWORD & co. of the process must not become credentials for every connection."""
+        stray = {"ZABBIX_USER": "someone", "ZABBIX_PASSWORD": "secret-password-1",
+                 "ZABBIX_TOKEN": "stray-global-token", "ZABBIX_URL": "http://elsewhere.invalid"}
+        for variables in (stray, {"ZABBIX_PASSWORD": "secret-password-1"}):
+            with self.subTest(variables=sorted(variables)), patch.dict(os.environ, variables):
+                with self.assertLogs("zabbix_mcp.client", level="WARNING") as logs:
+                    mgr = ClientManager(_config(self.zbx_a.url))
+                for name in variables:
+                    self.assertNotIn(name, os.environ)
+                self.assertTrue(any("ZABBIX_PASSWORD" in line for line in logs.output))
+                self.assertNotIn("secret-password-1", "\n".join(logs.output), "values are never logged")
+                rows = self._call_as(mgr, "a", {"x-mcp-token-ut": "alice-after-stray"})
+                self.assertEqual(rows[0]["host"], "a:alice-after-stray")
+
+    def test_service_token_server_is_not_hijacked_by_stray_environment(self):
+        zbx = FakeZabbix("svc")
+        try:
+            cfg = AppConfig(server=ServerConfig(), zabbix_servers={
+                "svc": ZabbixServerConfig(name="svc", url=zbx.url, api_token="service-token")})
+            with patch.dict(os.environ, {"ZABBIX_PASSWORD": "x", "ZABBIX_TOKEN": "stray"}):
+                mgr = ClientManager(cfg)
+                self.assertEqual(mgr.call("svc", "host.get", {"limit": 1})[0]["host"], "svc:service-token")
+        finally:
+            zbx.stop()
+
     def test_user_clients_are_bounded(self):
         mgr = ClientManager(_config(self.zbx_a.url))
         mgr._MAX_USER_CLIENTS = 3

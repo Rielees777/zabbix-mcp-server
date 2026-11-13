@@ -3354,16 +3354,23 @@ def run_server(
 
                 @asynccontextmanager
                 async def _lifespan_with_cleanup(app):
-                    async with _orig_lifespan_ctx(app) as state:
-                        cleanup_task = asyncio.create_task(_run_cleanup(_task_store))
-                        try:
-                            yield state
-                        finally:
-                            cleanup_task.cancel()
+                    try:
+                        async with _orig_lifespan_ctx(app) as state:
+                            cleanup_task = asyncio.create_task(_run_cleanup(_task_store))
                             try:
-                                await cleanup_task
-                            except (asyncio.CancelledError, Exception):
-                                pass
+                                yield state
+                            finally:
+                                cleanup_task.cancel()
+                                try:
+                                    await cleanup_task
+                                except (asyncio.CancelledError, Exception):
+                                    pass
+                    except Exception:
+                        # Without the lifespan the MCP session manager never starts and
+                        # /mcp cannot answer. uvicorn's default ("auto") would swallow this
+                        # as "lifespan protocol appears unsupported" and keep serving /health.
+                        logger.exception("The application lifespan failed - the MCP endpoint cannot work")
+                        raise
 
                 asgi_app.router.lifespan_context = _lifespan_with_cleanup
 
@@ -3400,6 +3407,9 @@ def run_server(
                 "port": port,
                 "log_level": config.server.log_level.lower(),
                 "access_log": False,  # Suppress uvicorn access logs — they mix formats with app logs
+                # A failed lifespan (the MCP session manager does not start) must stop the
+                # process, not leave a server that answers /health and nothing else.
+                "lifespan": "on",
             }
             if config.server.tls_cert_file and config.server.tls_key_file:
                 uvicorn_kwargs["ssl_certfile"] = config.server.tls_cert_file
