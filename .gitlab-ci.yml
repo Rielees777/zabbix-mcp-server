@@ -77,7 +77,9 @@ variables:
   SCAN_PROJECT_NAME: $PROJECT_NAME
   IMAGE_TAG: $CI_PIPELINE_IID
   VAULT_URL: "https://vaultapi.sovcombank.group"
-  DEBUG: "true"
+  # "true" turns on shell tracing in the shared build components and prints the registry
+  # password in the job log. Keep it off.
+  DEBUG: "false"
   IS_SECRETS: "true"
   VAULT_VER: "v2"
   # Тесты проекта (запускаются внутри собранного образа, см. ci-cd-files/Dockerfile)
