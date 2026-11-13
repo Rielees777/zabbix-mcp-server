@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.2 - 2026-11-13
+
+Build, deployment and request handling aligned with netbox-mcp, which already runs behind the gateway.
+
+- **Build:** `.gitlab-ci.yml` on the shared components 3.1.0 (`SH_TEST` / `SH_INT_R_PROD`), `GROUP_NAME: devnetops-mcp`; the Dockerfile pulls `devnetops-mcp/uss-rusca-db:8.0` (the image from another group's namespace caused the `401` on the base image), installs the Russian Trusted Root CA, pinned `requirements.txt` then the package with `--no-deps`. `helm/values-prod.yaml` and `values-test.yaml` in netbox-mcp's layout (port 8000, read-only root filesystem). A test keeps the base image in the project's group, the pins inside the `pyproject.toml` ranges and `DEBUG` off.
+- **Requests** (`AUTH_MODE=per_request_token`): at least one Zabbix token header is required besides `X-Request-By`; the server runs without MCP sessions (`stateless_http`); `transport=stdio`, `log_level=debug` and `verify_ssl=false` are refused at start-up; responses carry hardening headers; every tool call is written to the `zabbix_mcp.audit` logger without token or argument values.
+- `docs/EODIB-compliance.md`: the security model for the review, following netbox-mcp's.
+- `PUBLIC_URL` is no longer set in the Helm values (its Host check answered 421 to other `Host` values).
+
 ## v2.1 - 2026-11-13
 
 First release to run behind the gateway. It contains everything listed under v2.0 below (the environment-only configuration) plus: per-user Zabbix tokens read from request headers, tool groups (`core`, ...) and the hidden `raw_json`, the `X-Request-By` request gate, and the fixes that make the server start behind it (a failed application lifespan is now fatal and logged, stray `ZABBIX_*` variables are ignored). The first line of the log shows the version: `Zabbix MCP Server v2.1`.

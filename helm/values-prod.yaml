@@ -9,56 +9,59 @@ containers:
     runAsUser: 65534
     ports:
       - name: http
-        containerPort: 30030
+        containerPort: 8000
+    # Measured ~80 MiB resident with the core tools; tool responses add on top.
     requests:
-      memory: "256Mi"
-      cpu: "100m"
+      memory: "128Mi"
+      cpu: "50m"
     limits:
-      memory: "512Mi"
+      memory: "384Mi"
       cpu: "250m"
-readOnlyRootFilesystem: "false"
-# env не содержит секретов. Из Vault (путь $CI_PROJECT_ROOT_NAMESPACE/$CI_PROJECT_NAME)
-# в env контейнера инжектируются:
-#   ZABBIX_MCP_ZABBIX_SERVERS__PROD__URL        - адрес Zabbix, например https://zabbix.example.com
-#   ZABBIX_MCP_ZABBIX_SERVERS__PROD__API_TOKEN  - API-токен Zabbix (пользователь с минимальными правами)
-#   ZABBIX_MCP_SERVER__AUTH_TOKEN               - bearer-токен для MCP-клиентов
-#   ZABBIX_MCP_SERVER__AUTH_TOKEN_EXPIRES_AT    - (необязательно) срок действия токена, ISO 8601
-# Порт и режим сервера (transport=http, host=0.0.0.0, port=30030) заданы в ci-cd-files/Dockerfile.
-# Режим «токен в каждом запросе» с проверкой метки шлюза X-Request-By (без метки запрос получает 401;
-# /health открыт). Это метка, а не аутентификация: доступ к сервису должен быть только у шлюза.
-#   ZABBIX_MCP_SERVER__AUTH_MODE: "per_request_token"
-#   ZABBIX_MCP_SERVER__ALLOWED_REQUEST_BY: "personal"
-# Если у каждого пользователя свой токен Zabbix (не из Vault), вместо API_TOKEN для сервера задаётся
-# имя заголовка запроса, в котором клиент присылает свой токен (значения URL и имя заголовка не секретны):
-#   ZABBIX_MCP_ZABBIX_SERVERS__<ИМЯ>__URL: "https://..."
-#   ZABBIX_MCP_ZABBIX_SERVERS__<ИМЯ>__TOKEN_HEADER: "X-MCP-Token-UT"
-# Запрос без заголовка отклоняется. Заголовки с токенами не должны попадать в логи шлюза.
-# Инструменты, меняющие данные в Zabbix, заблокированы списком src/zabbix_mcp/blocked_write_tools.txt
-# (по умолчанию заблокированы все 138). Чтобы разрешить инструмент, удалите его строку и пересоберите образ,
-# либо подмонтируйте свой файл и укажите ZABBIX_MCP_SERVER__BLOCKED_TOOLS_FILE=<путь>.
-# Запись на конкретный Zabbix дополнительно требует READ_ONLY=false (по умолчанию true).
+
+
+runAsUser: "65534"
+readOnlyRootFilesystem: "true"
+emptyDir:
+  - name: tmp
+    mountPath: /tmp
+
+# Same layout as netbox-mcp. Nothing here is secret: in per_request_token mode every user
+# sends their own Zabbix tokens (X-MCP-Token-UT, X-MCP-Token-UTS) through the gateway.
 env:
-  # Набор инструментов по группам (README, "Token Budget"): core = 16 инструментов, около 16k токенов.
-  # Добавлять группы по запросам пользователей: core,availability,notifications,analytics,inventory,problems_raw
-  ZABBIX_MCP_SERVER__TOOLS: "core"
-  # Внешний адрес, который сервер сообщает клиентам. Должен совпадать с host в ingress ниже.
-  ZABBIX_MCP_SERVER__PUBLIC_URL: "https://zbx-mcp.sovcombank.group"
+  CI_COMMIT_SHORT_SHA: ""
+  ZABBIX_MCP_SERVER__TRANSPORT: "http"
+  ZABBIX_MCP_SERVER__HOST: "0.0.0.0"
+  ZABBIX_MCP_SERVER__PORT: "8000"
+  ZABBIX_MCP_SERVER__LOG_LEVEL: "info"
+  ZABBIX_MCP_SERVER__AUTH_MODE: "per_request_token"
+  ZABBIX_MCP_SERVER__ALLOWED_REQUEST_BY: "personal"
+  # Tool groups (README, "Token Budget"); core = 16 tools.
+  ZABBIX_MCP_SERVER__TOOLS: "core,availability,notifications,analytics,inventory,problems_raw"
+  ZABBIX_MCP_ZABBIX_SERVERS__UT__URL: "https://zabbix-ut.sovcombank.group"
+  ZABBIX_MCP_ZABBIX_SERVERS__UT__TOKEN_HEADER: "X-MCP-Token-UT"
+  ZABBIX_MCP_ZABBIX_SERVERS__UTS__URL: "https://uhq-zbx-uts-web1.sovcombank.group"
+  ZABBIX_MCP_ZABBIX_SERVERS__UTS__TOKEN_HEADER: "X-MCP-Token-UTS"
 
 service:
   zabbix-mcp-server:
     ports:
-    - servicePortName: http
-      servicePort: 30030
+      - servicePortName: http
+        servicePort: 8000
 
 ingress:
   zabbix-mcp-server:
     class: nginx
-    annotations:
-      nginx.ingress.kubernetes.io/proxy-body-size: "10m"
     host:
       - name: "zbx-mcp.sovcombank.group"
         path:
-          - uri: "/mcp"
-            pathType: Prefix
+          - uri: "/"
             serviceName: zabbix-mcp-server
-            servicePort: 30030
+            servicePort: 8000
+
+imagePullSecrets: ""
+rollme: "true"
+
+diagnosticMode:
+  enable: "false"
+  command: ["sleep"]
+  args: ["infinity"]

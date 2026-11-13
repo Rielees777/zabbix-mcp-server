@@ -1330,6 +1330,11 @@ def _make_request_context_middleware(inner_app, trusted_proxies: list[str], conf
     gate_on = config is not None and getattr(config.server, "auth_mode", "service") == "per_request_token"
     gate_header = (getattr(config.server, "request_by_header", "X-Request-By") if gate_on else "").lower()
     gate_values = set(getattr(config.server, "allowed_request_by", None) or ["personal"]) if gate_on else set()
+    # At least one Zabbix token must come with the request, so no call can ever run
+    # without the caller's own credential (as in netbox-mcp's X-MCP-Token check).
+    gate_token_headers = (
+        {s.token_header for s in config.zabbix_servers.values() if s.token_header} if gate_on else set()
+    )
 
     async def _middleware(scope, receive, send):
         if scope["type"] == "lifespan":
@@ -1340,18 +1345,21 @@ def _make_request_context_middleware(inner_app, trusted_proxies: list[str], conf
         if gate_on and scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 1008})   # MCP does not use websockets
             return
-        if gate_on and scope["type"] == "http":
+        if gate_on and scope["type"] == "http" and scope.get("method") != "OPTIONS":
             path = scope.get("path", "")
             if path not in _GATE_EXEMPT_PATHS and not path.startswith(_GATE_EXEMPT_PREFIXES):
                 sent = None
+                has_token = False
                 for key, value in scope.get("headers", []):
-                    if key.decode("latin-1").lower() == gate_header:
+                    name = key.decode("latin-1").lower()
+                    if name == gate_header and sent is None:
                         sent = value.decode("latin-1")
-                        break
-                if sent not in gate_values:
+                    elif name in gate_token_headers and value.strip():
+                        has_token = True
+                if sent not in gate_values or not has_token:
                     from starlette.responses import JSONResponse
                     await JSONResponse(
-                        {"detail": f"missing or invalid {config.server.request_by_header} header"},
+                        {"error": "unauthorized", "detail": "missing or invalid MCP auth headers"},
                         status_code=401,
                         headers={"WWW-Authenticate": 'MCP-Token realm="zabbix-mcp-server"'},
                     )(scope, receive, send)
@@ -2950,6 +2958,85 @@ def _strip_raw_json(tools: list) -> list:
     return out
 
 
+_SECURITY_HEADERS = (
+    (b"x-content-type-options", b"nosniff"),
+    (b"x-frame-options", b"DENY"),
+    (b"x-xss-protection", b"0"),
+    (b"content-security-policy", b"default-src 'none'"),
+    (b"strict-transport-security", b"max-age=31536000; includeSubDomains"),
+    (b"referrer-policy", b"no-referrer"),
+)
+
+
+def _security_headers_middleware(inner_app):
+    """Add hardening headers to every HTTP response (pure ASGI: streams are not buffered)."""
+
+    async def _middleware(scope, receive, send):
+        if scope["type"] != "http":
+            await inner_app(scope, receive, send)
+            return
+
+        async def send_with_headers(message):
+            if message["type"] == "http.response.start":
+                present = {k.lower() for k, _ in message.get("headers", [])}
+                headers = list(message.get("headers", []))
+                headers.extend((k, v) for k, v in _SECURITY_HEADERS if k not in present)
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await inner_app(scope, receive, send_with_headers)
+
+    return _middleware
+
+
+audit_logger = logging.getLogger("zabbix_mcp.audit")
+
+
+def _install_audit_log(mcp: MCPServer, config: AppConfig) -> None:
+    """One audit record per tool call: who (untrusted), what, which server, outcome.
+
+    Logged: tool name, ``server`` argument, the NAMES of the other arguments (never
+    their values), the principal header as the client declared it, a correlation id
+    (taken from the request or generated), the outcome and the duration. Tokens and
+    argument values are never logged.
+    """
+    original = mcp._lowlevel_server.get_request_handler("tools/call")
+    if original is None:
+        return
+    principal_header = config.server.principal_header.lower()
+    correlation_header = config.server.correlation_header.lower()
+
+    async def wrapped(ctx, params, _orig=original):
+        import uuid
+
+        headers = _request_headers(ctx)
+        principal = headers.get(principal_header) if headers is not None else None
+        correlation = (headers.get(correlation_header) if headers is not None else None) or uuid.uuid4().hex
+        arguments = dict(getattr(params, "arguments", None) or {})
+        record = {
+            "event": "tool_call",
+            "tool": getattr(params, "name", None),
+            "server": arguments.pop("server", None) or config.default_server,
+            "argument_keys": sorted(arguments),
+            "principal": principal,          # untrusted, informational only
+            "correlation_id": correlation,
+        }
+        started = time.monotonic()
+        try:
+            result = await _orig.handler(ctx, params)
+        except Exception as exc:
+            record.update(outcome="exception", error=type(exc).__name__,
+                          duration_ms=round((time.monotonic() - started) * 1000))
+            audit_logger.info(json.dumps(record, ensure_ascii=False))
+            raise
+        record.update(outcome="error" if getattr(result, "is_error", False) else "ok",
+                      duration_ms=round((time.monotonic() - started) * 1000))
+        audit_logger.info(json.dumps(record, ensure_ascii=False))
+        return result
+
+    mcp._lowlevel_server.add_request_handler("tools/call", original.params_type, wrapped)
+
+
 def _install_user_token_context(mcp: MCPServer, config: AppConfig) -> list[str]:
     """Let servers that take the caller's own token read it from the request.
 
@@ -2992,6 +3079,9 @@ def run_server(
 ) -> None:
     """Create and run the MCP server."""
     config._runtime_port = port
+    if config.server.auth_mode == "per_request_token" and transport == "stdio":
+        # The config check covers the setting; this covers a --transport stdio override.
+        raise SystemExit("auth_mode=per_request_token cannot run over stdio: the tokens arrive in HTTP headers")
     global _RAW_JSON_ALLOWED
     _RAW_JSON_ALLOWED = config.server.allow_raw_json
 
@@ -3258,6 +3348,7 @@ def run_server(
         "tools/list", _orig_entry.params_type, _list_tools_with_execution)
 
     token_headers = _install_user_token_context(mcp, config)
+    _install_audit_log(mcp, config)   # outermost: records every call, refused ones included
     if token_headers:
         per_user = [n for n, s in config.zabbix_servers.items() if s.token_header]
         logger.info(
@@ -3379,7 +3470,12 @@ def run_server(
         if transport in ("http", "sse"):
             # Build the ASGI app from MCPServer for full control over TLS and CORS
             if transport == "http":
-                asgi_app = mcp.streamable_http_app(transport_security=transport_security)
+                # Per-request tokens: no sessions, so a caller's token can never be bound to a
+                # session and reused by another request (the same choice as netbox-mcp).
+                asgi_app = mcp.streamable_http_app(
+                    transport_security=transport_security,
+                    stateless_http=config.server.auth_mode == "per_request_token",
+                )
             else:
                 asgi_app = mcp.sse_app()
 
@@ -3423,6 +3519,8 @@ def run_server(
             # cannot impersonate an arbitrary IP via XFF.
             asgi_app = _make_request_context_middleware(
                 asgi_app, config.server.trusted_proxies or [], config)
+            # Outermost, so the gate's 401 carries the hardening headers too.
+            asgi_app = _security_headers_middleware(asgi_app)
             if config.server.auth_mode == "per_request_token":
                 logger.info(
                     "Request gate ON (auth_mode=per_request_token): '%s' must be one of %s; "

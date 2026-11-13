@@ -140,6 +140,10 @@ ZABBIX_MCP_SERVER__ALLOWED_REQUEST_BY=personal        # comma separated; default
 ZABBIX_MCP_SERVER__REQUEST_BY_HEADER=X-Request-By     # default
 ```
 
+- At least one of the servers' token headers (`X-MCP-Token-UT`, `X-MCP-Token-UTS`) must be present and non-empty, as `netbox-mcp` requires its `X-MCP-Token`; a request without any credential gets `401`.
+- The server runs **without MCP sessions** (`stateless_http`), so a token can never be bound to a session and reused by another request.
+- Unsafe production settings are refused at start-up: `transport=stdio`, `log_level=debug`, `verify_ssl=false` on any Zabbix server.
+- Every response carries hardening headers (`X-Content-Type-Options`, `X-Frame-Options`, `Content-Security-Policy: default-src 'none'`, HSTS, `Referrer-Policy`), and every tool call writes an audit record to the `zabbix_mcp.audit` logger: tool, server, argument names (never values), the declared principal, a correlation id, outcome and duration. Tokens are never logged.
 - The header **name** is case-insensitive, the **value** must match exactly.
 - `/health` and `/reports/` (report links people open in a browser) are exempt; only HTTP requests are judged, never the application's start-up, and websockets are refused (MCP does not use them).
 - **It is a marker, not authentication.** It says "this came through the gateway"; anybody who can reach the server can send it. Keep the server reachable only from the gateway (a NetworkPolicy, `ALLOWED_HOSTS` with the gateway's address) or have the gateway add the MCP bearer (`AUTH_TOKEN`). The start-up log says "Request gate ON".
@@ -169,6 +173,7 @@ ZABBIX_MCP_ZABBIX_SERVERS__OLD__PASSWORD=...               # from Vault, never c
 | `TRANSPORT` | `stdio` (default), `http` (recommended) or `sse` |
 | `AUTH_MODE` | `service` (default) or `per_request_token`: every Zabbix server takes the caller's token from its `TOKEN_HEADER` and the request gate is on, see [Request gate](#request-gate-x-request-by) |
 | `ALLOWED_REQUEST_BY`, `REQUEST_BY_HEADER` | Gate values (default `personal`) and header name (default `X-Request-By`) |
+| `PRINCIPAL_HEADER`, `CORRELATION_HEADER` | Headers written to the audit log (default `X-MCP-Request-Principal`, `X-Request-Id`); the principal is untrusted and never used for access |
 | `DEFAULT_SERVER` | Zabbix server used when a call names none (default: first in alphabetical order) |
 | `HOST`, `PORT` | HTTP bind address and port (default `127.0.0.1:8080`) |
 | `AUTH_TOKEN` | Bearer token MCP clients must send, see [Authentication](#authentication-of-mcp-clients) |
@@ -256,24 +261,20 @@ There are no per-token scopes or policies any more: the token grants access to a
 
 ### Kubernetes, Helm and Vault
 
-The server reads only its environment (and, optionally, files), so it never talks to Vault itself. The repository carries the same build-and-deploy setup as the other MCP services:
+Build and deployment follow `netbox-mcp`, the MCP service of the same group that already runs behind the gateway:
 
 | File | Purpose |
 |---|---|
-| [`.gitlab-ci.yml`](.gitlab-ci.yml) | Pipeline built from the shared components: build, `pytest` inside the built image, deploy to the test and prod stands (manual on `devops*`/`test` and `main`/`master`), Vault secrets from `$CI_PROJECT_ROOT_NAMESPACE/$CI_PROJECT_NAME` |
-| [`ci-cd-files/Dockerfile`](ci-cd-files/Dockerfile) | Pipeline image: installs the package from the Nexus PyPI proxy, runs the HTTP transport on `0.0.0.0:30030` as `nobody`. Without the `reporting` extra, so `report_generate` is not available in this image |
-| [`helm/values-prod.yaml`](helm/values-prod.yaml) | Values for the shared chart: Deployment, Service, Ingress on `/mcp` |
+| [`.gitlab-ci.yml`](.gitlab-ci.yml) | Shared components `devops-dbt/components` 3.1.0: build, scan, deploy to the test stand (`SH_TEST`) and prod (`SH_INT_R_PROD`); image `registry.sovcombank.group/devnetops-mcp/<project>:<ENVRM>-<pipeline>`; Vault path `${K8S_NAMESPACE_BASE}/${PROJECT_NAME}/${ENVRM}`; `DEBUG: "false"` (tracing would print the registry password) |
+| [`ci-cd-files/Dockerfile`](ci-cd-files/Dockerfile) | Base `devnetops-mcp/uss-rusca-db:8.0` (the group's own namespace - pulling another group's image fails with 401), the Russian Trusted Root CA in the system store, `pip install -r requirements.txt` then `pip install --no-deps .` from the Nexus PyPI proxy, runs as `nobody` |
+| [`requirements.txt`](requirements.txt) | Exact versions for the image, inside the ranges of `pyproject.toml` (a test checks it); `requirements-dev.txt` adds pytest |
+| [`helm/values-prod.yaml`](helm/values-prod.yaml), [`helm/values-test.yaml`](helm/values-test.yaml) | Deployment on port 8000, read-only root filesystem with `/tmp` as `emptyDir`, Service, Ingress on `/` of its own host |
 
-**Secrets** are put in Vault under the project path and injected into the container as environment variables - nothing secret is in git or in the image:
+In the Helm values everything is plain configuration: `AUTH_MODE=per_request_token`, the two Zabbix servers with their URL and `TOKEN_HEADER`, the tool groups. **There is no Zabbix secret to store**: each user sends their own tokens through the gateway (`X-MCP-Token-UT`, `X-MCP-Token-UTS`). Remove `..._API_TOKEN` keys of these servers and any `ZABBIX_USER` / `ZABBIX_PASSWORD` / `ZABBIX_TOKEN` from the Vault path: a server with both `TOKEN_HEADER` and `API_TOKEN` is rejected as misconfigured.
 
-| Vault key | Meaning |
-|---|---|
-| `ZABBIX_MCP_ZABBIX_SERVERS__PROD__URL` | Zabbix frontend URL |
-| `ZABBIX_MCP_ZABBIX_SERVERS__PROD__API_TOKEN` | Zabbix API token of a least-privilege user |
-| `ZABBIX_MCP_SERVER__AUTH_TOKEN` | Bearer token MCP clients send |
-| `ZABBIX_MCP_SERVER__AUTH_TOKEN_EXPIRES_AT` | Optional expiry of that token (ISO 8601) |
+`PUBLIC_URL` is not set, as in netbox-mcp: the pod is only reached through the Ingress and the gateway, and the Host check it would enable answers `421` to any other `Host` the gateway sends. Settings are read once at start-up; change them by redeploying.
 
-Non-secret settings go into `env:` of `helm/values-prod.yaml` (it already sets `ZABBIX_MCP_SERVER__PUBLIC_URL`, which must match the Ingress host). Settings are read once at start-up, so rotating a secret means redeploying or restarting the pods.
+How the requests are protected is described for the security review in [`docs/EODIB-compliance.md`](docs/EODIB-compliance.md).
 
 If your cluster mounts Vault secrets as files instead (Vault Agent Injector, CSI), point `ZABBIX_MCP_SECRETS_DIR` at the mount (default `/vault/secrets`): every file is read as the variable of the same name in lower case, e.g. `zabbix_mcp_zabbix_servers__prod__api_token`; trailing newlines are stripped, dot-files (the `..data` bookkeeping of mounted Secrets) are ignored, and real environment variables win over files.
 

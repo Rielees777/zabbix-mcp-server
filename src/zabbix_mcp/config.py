@@ -283,6 +283,10 @@ class ServerConfig(_Frozen):
     # the server can send it. /health and /reports/ are exempt.
     allowed_request_by: EnvList = Field(default_factory=lambda: ["personal"])
     request_by_header: str = "X-Request-By"
+    # Audit log annotations. The principal is whatever the CLIENT says it is: it is
+    # logged for traceability and never used for an access decision.
+    principal_header: str = "X-MCP-Request-Principal"
+    correlation_header: str = "X-Request-Id"
     # Zabbix server used when a call names none. Empty = the first one in
     # alphabetical order (the order of environment variables is not stable).
     default_server: str | None = None
@@ -305,13 +309,15 @@ class ServerConfig(_Frozen):
         value = _csv(value)
         return value or ["personal"]       # an empty list would lock everybody out
 
-    @field_validator("request_by_header", mode="before")
+    @field_validator("request_by_header", "principal_header", "correlation_header", mode="before")
     @classmethod
-    def _request_by_header_name(cls, value: Any) -> Any:
+    def _header_names(cls, value: Any, info: Any) -> Any:
         import re
-        name = str(value or "X-Request-By").strip()
+        defaults = {"request_by_header": "X-Request-By", "principal_header": "X-MCP-Request-Principal",
+                    "correlation_header": "X-Request-Id"}
+        name = str(value or defaults[info.field_name]).strip()
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,63}", name):
-            raise ValueError(f"request_by_header '{value}' is not a valid HTTP header name")
+            raise ValueError(f"{info.field_name} '{value}' is not a valid HTTP header name")
         return name
 
     @field_validator("default_server", mode="before")
@@ -384,6 +390,13 @@ class ServerConfig(_Frozen):
 
     @model_validator(mode="after")
     def _check_tls_and_public_url(self) -> "ServerConfig":
+        if self.auth_mode == "per_request_token":
+            # Production behind the gateway: refuse settings that are unsafe there
+            # instead of warning about them.
+            if self.transport == "stdio":
+                raise ValueError("auth_mode=per_request_token needs transport http (or sse): tokens arrive in HTTP headers")
+            if self.log_level == "debug":
+                raise ValueError("log_level=debug is not allowed with auth_mode=per_request_token (it can log request data)")
         if self.tls_cert_file and not self.tls_key_file:
             raise ValueError("tls_key_file is required when tls_cert_file is set")
         if self.tls_key_file and not self.tls_cert_file:
@@ -582,6 +595,12 @@ class AppConfig(BaseSettings):
                 raise ValueError(
                     "auth_mode=per_request_token needs every Zabbix server to read the caller's token "
                     f"from a header; set TOKEN_HEADER for: {', '.join(plain)}"
+                )
+            unverified = sorted(n for n, c in good.items() if not c.verify_ssl)
+            if unverified:
+                raise ValueError(
+                    "auth_mode=per_request_token does not allow verify_ssl=false (users' tokens travel "
+                    f"to Zabbix); fix: {', '.join(unverified)}"
                 )
         seen: dict[str, str] = {}
         for name, srv_cfg in good.items():

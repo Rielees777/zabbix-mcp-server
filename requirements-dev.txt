@@ -1,0 +1,5 @@
+# Development dependencies: runtime plus the test runner.
+# Install with: pip install -r requirements-dev.txt && pip install -e . --no-deps
+-r requirements.txt
+
+pytest==9.1.1

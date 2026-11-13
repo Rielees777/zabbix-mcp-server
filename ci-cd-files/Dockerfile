@@ -1,27 +1,20 @@
-FROM registry.sovcombank.group/devnetops-dc/uss-rusca-db:8.0
+FROM registry.sovcombank.group/devnetops-mcp/uss-rusca-db:8.0
 
 WORKDIR /app
+
 COPY ./ /app
 
-# Python 3.10+ is required. Fail the build early with a clear message otherwise.
-RUN python -c "import sys; assert sys.version_info >= (3, 10), 'Python 3.10+ required, got ' + sys.version"
+# Trust the Russian root CA in the system store: the Zabbix servers' certificates may be
+# issued under it, and the server verifies TLS through the system store.
+COPY ci-cd-files/Russian_Trusted_Root_CA.crt /usr/local/share/ca-certificates/Russian_Trusted_Root_CA.crt
+RUN update-ca-certificates --fresh
 
-# The [dev] extra brings pytest so the pipeline's `test` job can run inside this image.
-# PDF reports (the [reporting] extra) are left out: weasyprint needs system libraries
-# (Cairo, Pango) that this base image does not ship; report_generate is simply not registered.
-RUN pip install ".[dev]" \
-    --trusted-host nexus.sovcombank.group \
-    --index-url "https://nexus.sovcombank.group/repository/pypi-proxy/simple"
-
-# Run as a network service in Kubernetes. Secrets and Zabbix connection settings
-# (ZABBIX_MCP_ZABBIX_SERVERS__<NAME>__URL / __API_TOKEN, ZABBIX_MCP_SERVER__AUTH_TOKEN, ...)
-# are NOT baked in: they come from Vault via the pipeline's k8s component as env variables.
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    ZABBIX_MCP_SERVER__TRANSPORT=http \
-    ZABBIX_MCP_SERVER__HOST=0.0.0.0 \
-    ZABBIX_MCP_SERVER__PORT=30030
+ENV PIP_INDEX_URL=https://nexus.sovcombank.group/repository/pypi-proxy/simple \
+    PIP_TRUSTED_HOST=nexus.sovcombank.group \
+    PYTHONDONTWRITEBYTECODE=1
+RUN pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir --no-deps .
 
 USER nobody
-EXPOSE 30030
 
-CMD ["python", "-m", "zabbix_mcp"]
+CMD ["zabbix-mcp-server"]

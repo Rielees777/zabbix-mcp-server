@@ -1,0 +1,9 @@
+# Runtime dependencies of zabbix-mcp-server, pinned for the image build
+# (ci-cd-files/Dockerfile: pip install -r requirements.txt && pip install --no-deps .).
+# Verified on Python 3.12 with the full test suite. Keep within the ranges in pyproject.toml.
+mcp==2.3.0
+zabbix-utils==2.0.4
+pydantic==2.13.5
+pydantic-settings==2.15.0
+tzdata==2026.6
+jinja2==3.1.6
